@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Build & generated files
+build/
+*.log
+*.aux
+*.out
+*.toc
+
+# Exam artifacts
+exam_data.json
+lecture.pdf
+exam_generated.pdf
+
+# Env / secrets
+.env
+*.env
+/etc/examgen.env
+
+# LaTeX auxiliary
+*.synctex.gz

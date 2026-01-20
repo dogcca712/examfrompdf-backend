@@ -1,0 +1,124 @@
+\documentclass[12pt]{article}
+
+% ---- Fixed packages (do not change dynamically) ----
+\usepackage[T1]{fontenc}
+\usepackage{lmodern} % Latin Modern: paper-like look
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{needspace}
+\usepackage{fancyhdr}
+\usepackage{setspace}
+\usepackage{microtype}
+
+% ---- Fixed page setup ----
+\geometry{a4paper, margin=25mm}
+\setstretch{1.15}
+
+% ---- Header / footer ----
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\textit{((( course_code )))}}   % e.g., INFO1111
+\rhead{\textit{Practice Exam}}
+\cfoot{\thepage}
+
+% ---- Utility macros ----
+\newcommand{\ExamTitle}[1]{\begin{center}\Large\textbf{#1}\end{center}\vspace{0.5em}}
+\newcommand{\ExamMeta}[2]{%
+\vspace{-0.3em}
+\noindent\textbf{Course:} #1 \hfill \textbf{Date:} #2\\
+\textbf{Name:} \underline{\hspace{7cm}} \hfill \textbf{Student ID:} \underline{\hspace{4cm}}\\
+\vspace{0.8em}
+}
+
+% Keep questions from splitting badly
+\newcommand{\QBlockStart}[1]{\needspace{#1\baselineskip}}
+
+% ---------------- Question macros ----------------
+% MCQ args:
+%  #1 q number
+%  #2 stem
+%  #3 option A
+%  #4 option B
+%  #5 option C
+%  #6 option D
+%  #7 marks
+\newcommand{\MCQ}[7]{%
+\QBlockStart{10}
+\noindent\textbf{Q#1.} #2 \hfill \textbf{[#7~marks]}\\
+\begin{enumerate}[label=(\Alph*), itemsep=0.2em, topsep=0.2em, leftmargin=2.2em]
+  \item #3
+  \item #4
+  \item #5
+  \item #6
+\end{enumerate}
+\vspace{0.6em}
+}
+
+\newcommand{\SAQ}[3]{%
+\QBlockStart{10}
+\noindent\textbf{Q#1.} #2 \hfill \textbf{[#3~marks]}\\
+\vspace{4.5em}
+}
+
+\newcommand{\LQ}[3]{%
+\QBlockStart{14}
+\noindent\textbf{Q#1.} #2 \hfill \textbf{[#3~marks]}\\
+\vspace{10em}
+}
+
+
+\begin{document}
+
+\ExamTitle{((( exam_title )))}
+\ExamMeta{((( course_name ))) }{((( exam_date )))}
+
+\noindent\textbf{Instructions}
+\begin{itemize}[itemsep=0.2em, topsep=0.2em]
+  \item Answer all questions.
+  \item This paper is for practice only.
+  \item Show your working where appropriate.
+\end{itemize}
+
+\vspace{0.8em}
+
+% ---------------- Section A ----------------
+\noindent\Large\textbf{Section A: Multiple Choice}\normalsize\\
+\noindent\textit{Choose the best answer for each question.}\\
+\vspace{0.5em}
+
+% --- MCQs generated from JSON ---
+((* for q in mcq_questions *))
+\MCQ{((( loop.index )))}{((( q.stem )))}%
+{((( q.options[0] )))}%
+{((( q.options[1] )))}%
+{((( q.options[2] )))}%
+{((( q.options[3] )))}%
+{((( q.marks )))}%
+((* endfor *))
+
+
+
+\vspace{0.6em}
+
+% ---------------- Section B ----------------
+\noindent\Large\textbf{Section B: Short Answer}\normalsize\\
+\setcounter{enumi}{0}
+\vspace{0.5em}
+
+((* for q in saq_questions *))
+\SAQ{((( mcq_count + loop.index )))}{((( q.stem )))}{((( q.marks )))}%
+((* endfor *))
+
+
+
+% ---------------- Section C ----------------
+\noindent\Large\textbf{Section C: Long Question}\normalsize\\
+\vspace{0.5em}
+
+((* for q in lq_questions *))
+\LQ{((( mcq_count + saq_count + loop.index )))}{((( q.stem )))}{((( q.marks )))}%
+((* endfor *))
+
+
+\end{document}
