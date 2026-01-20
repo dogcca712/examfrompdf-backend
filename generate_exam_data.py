@@ -275,10 +275,28 @@ Here is the previous JSON (may be invalid):
 
 
 if __name__ == "__main__":
-    pdf_path = "lecture.pdf"  # 确保这个文件存在于当前目录
+    import sys
+    from pathlib import Path
+    
+    # 支持命令行参数：pdf_path 和可选的输出路径
+    if len(sys.argv) > 1:
+        pdf_path = sys.argv[1]
+    else:
+        pdf_path = "lecture.pdf"  # 默认值
+    
+    # 支持环境变量或命令行参数指定输出路径
+    if len(sys.argv) > 2:
+        output_path = sys.argv[2]
+    else:
+        output_path = os.environ.get("EXAMGEN_OUTPUT_JSON", "exam_data.json")
+    
+    output_path = Path(output_path)
+    
     text = extract_text_from_pdf(pdf_path)
 
-    print("Extracted text length:", len(text))
+    print(f"Extracted text length: {len(text)}")
+    print(f"PDF path: {pdf_path}")
+    print(f"Output JSON path: {output_path}")
 
     exam_data, raw = generate_exam_json(text)
 
@@ -298,9 +316,12 @@ if __name__ == "__main__":
         exam_data = repair_exam_json(raw, errors)
         raw = json.dumps(exam_data, ensure_ascii=False)
 
-    with open("exam_data.json", "w", encoding="utf-8") as f:
+    # 确保输出目录存在
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(exam_data, f, indent=2, ensure_ascii=False)
 
-    print("Saved exam_data.json (validated)")
+    print(f"Saved exam_data.json to {output_path} (validated)")
 
 

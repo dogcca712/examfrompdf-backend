@@ -47,18 +47,14 @@ def run_job(job_id: str, lecture_path: Path):
     try:
         JOBS[job_id]["status"] = "running"
 
-        # 1) 生成 JSON
+        # 1) 生成 JSON - 直接输出到 job_dir，避免并发冲突
+        job_exam_data_json = job_dir / "exam_data.json"
         subprocess.run(
-            [sys.executable, str(BASE_DIR / "generate_exam_data.py"), str(job_lecture)],
+            [sys.executable, str(BASE_DIR / "generate_exam_data.py"), str(job_lecture), str(job_exam_data_json)],
             cwd=str(BASE_DIR),
             check=True,
             env=os.environ.copy(),
         )
-
-        # 2) 渲染 tex（render_exam.py 读取 BASE_DIR/exam_data.json 并输出 build/exam_filled.tex）
-        #    为了并发安全：我们把 exam_data.json / build 文件复制到 job_dir 下再编译
-        #    这里用最简单的方式：生成后把文件拷到 job_dir，再在 job_dir 里运行 render+latex
-        shutil.copy2(BASE_DIR / "exam_data.json", job_dir / "exam_data.json")
 
         # 将 templates 拷一份（避免你以后改模板影响旧 job）
         # 可选：如果你不想拷模板，可以不拷，直接用 BASE_DIR/templates
