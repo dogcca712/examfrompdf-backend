@@ -11,9 +11,22 @@ def extract_text_from_pdf(path: str, max_pages: int = 10) -> str:
         num_pages = min(len(pdf.pages), max_pages)
         for i in range(num_pages):
             page = pdf.pages[i]
+            # 尝试提取文本，如果失败则尝试其他方法
             text = page.extract_text() or ""
+            # 如果提取的文本为空或很少，尝试使用layout模式
+            if len(text.strip()) < 10:
+                # 尝试提取表格和文本
+                tables = page.extract_tables()
+                if tables:
+                    for table in tables:
+                        table_text = "\n".join([" ".join([str(cell) if cell else "" for cell in row]) for row in table])
+                        text += "\n" + table_text
             texts.append(text)
-    return "\n\n".join(texts)
+    result = "\n\n".join(texts)
+    # 如果提取的文本太少，记录警告
+    if len(result.strip()) < 50:
+        print(f"Warning: Extracted text is very short ({len(result)} chars). PDF may be image-based or encrypted.")
+    return result
 
 
 def build_prompt(lecture_text: str) -> str:

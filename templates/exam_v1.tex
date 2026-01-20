@@ -1,7 +1,8 @@
 \documentclass[12pt]{article}
 
 % ---- Fixed packages (do not change dynamically) ----
-\usepackage[UTF8]{ctex} % 中文支持
+% 中文支持：如果内容包含中文，ctex会自动处理；如果不包含，pdflatex也能正常编译
+\usepackage[UTF8]{ctex} % 中文支持（pdflatex会忽略，xelatex会使用）
 \usepackage[T1]{fontenc}
 \usepackage{lmodern} % Latin Modern: paper-like look
 \usepackage{amsmath,amssymb}

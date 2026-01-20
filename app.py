@@ -77,10 +77,25 @@ def run_job(job_id: str, lecture_path: Path):
             env=env,
         )
 
-        # 3) 编译 PDF - 使用xelatex支持中文
+        # 3) 编译 PDF - 检测是否需要中文支持
         tex_path = job_dir / "build" / "exam_filled.tex"
+        
+        # 读取生成的tex文件，检测是否包含中文字符
+        with open(tex_path, "r", encoding="utf-8") as f:
+            tex_content = f.read()
+        
+        # 检测是否包含中文字符（CJK字符范围）
+        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in tex_content)
+        
+        if has_chinese:
+            # 使用xelatex支持中文
+            compiler = "xelatex"
+        else:
+            # 使用pdflatex（更快，兼容性更好）
+            compiler = "pdflatex"
+        
         subprocess.run(
-            ["xelatex", "-interaction=nonstopmode", "-output-directory", str(job_dir / "build"), str(tex_path)],
+            [compiler, "-interaction=nonstopmode", "-output-directory", str(job_dir / "build"), str(tex_path)],
             check=True,
         )
 
