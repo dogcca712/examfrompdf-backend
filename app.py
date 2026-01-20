@@ -77,10 +77,10 @@ def run_job(job_id: str, lecture_path: Path):
             env=env,
         )
 
-        # 3) 编译 PDF
+        # 3) 编译 PDF - 使用xelatex支持中文
         tex_path = job_dir / "build" / "exam_filled.tex"
         subprocess.run(
-            ["pdflatex", "-interaction=nonstopmode", "-output-directory", str(job_dir / "build"), str(tex_path)],
+            ["xelatex", "-interaction=nonstopmode", "-output-directory", str(job_dir / "build"), str(tex_path)],
             check=True,
         )
 
