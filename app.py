@@ -9,7 +9,6 @@ import sys
 import uuid
 import threading
 import time
-import uuid
 from fastapi.responses import JSONResponse
 
 BASE_DIR = Path(__file__).parent
@@ -123,99 +122,88 @@ async def generate_exam(lecture_pdf: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
     job_id = str(uuid.uuid4())
-    job_dir = BUILD_DIR / job_id
+    
+    # 初始化 job 状态
+    JOBS[job_id] = {
+        "status": "queued",
+        "error": None,
+        "pdf_path": None,
+        "created_at": time.time()
+    }
+    
+    # 使用 BUILD_ROOT 保持一致性
+    job_dir = BUILD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     lecture_path = job_dir / "lecture.pdf"
     with lecture_path.open("wb") as f:
         shutil.copyfileobj(lecture_pdf.file, f)
 
-    # 运行生成 JSON（注意：这里要用 sys.executable，并且传 lecture_path）
-    try:
-        subprocess.run(
-            [sys.executable, "generate_exam_data.py", str(lecture_path)],
-            check=True,
-            cwd=BASE_DIR,
-        )
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"generate_exam_data.py failed: {e}")
-
-    # 渲染 tex（你 render_exam.py 如果读固定 exam_data.json，也建议改成读 job_dir 内的）
-    try:
-        subprocess.run(
-            [sys.executable, "render_exam.py"],
-            cwd=BASE_DIR,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"render_exam.py failed: {e}")
-
-    # 编译 PDF（输出到 job_dir）
-    try:
-        subprocess.run(
-            ["pdflatex", "-interaction=nonstopmode",
-             "-output-directory", str(job_dir),
-             str(BASE_DIR / "build" / "exam_filled.tex")],
-            cwd=BASE_DIR,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"pdflatex failed: {e}")
-
-    pdf_path = job_dir / "exam_filled.pdf"
-    if not pdf_path.exists():
-        raise HTTPException(status_code=500, detail="PDF was not generated.")
+    # 使用后台线程执行任务，避免阻塞
+    thread = threading.Thread(target=run_job, args=(job_id, lecture_path))
+    thread.daemon = True
+    thread.start()
 
     return JSONResponse({"job_id": job_id})
 @app.get("/status/{job_id}")
-async def get_status(job_id: str):
-    """
-    Very simple job status:
-    - 如果该 job 的 exam_filled.pdf 已经生成 -> done
-    - 如果 job 目录存在但 pdf 还没出来 -> running
-    - 如果连目录都没有 -> queued（前端会继续轮询）
-    """
-    job_dir = BUILD_DIR / job_id
-    pdf_path = job_dir / "exam_filled.pdf"
-
-    if pdf_path.exists():
-        return {"status": "done"}
-    elif job_dir.exists():
-        return {"status": "running"}
-    else:
-        return {"status": "queued"}
-
-@app.get("/status/{job_id}")
 async def job_status(job_id: str):
-    job_dir = BUILD_DIR / job_id
-    pdf_path = job_dir / "exam_filled.pdf"
+    """
+    查询 job 状态
+    """
+    # 先检查内存中的状态
+    if job_id in JOBS:
+        job = JOBS[job_id]
+        status = job.get("status", "unknown")
+        
+        # 如果状态是 done，返回 PDF 路径
+        if status == "done":
+            return {
+                "status": "done"
+            }
+        elif status == "failed":
+            return {
+                "status": "failed",
+                "error": job.get("error", "Unknown error")
+            }
+        else:
+            return {"status": status}
+    
+    # 如果内存中没有，检查文件系统（向后兼容）
+    job_dir = BUILD_ROOT / job_id
+    pdf_path = job_dir / "build" / "exam_filled.pdf"
 
-    # job 不存在
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="job not found")
-
-    # 已生成完成
     if pdf_path.exists():
         return {
             "status": "done"
         }
-
-    # 还在处理中
-    return {
-        "status": "running"
-    }
+    elif job_dir.exists():
+        return {"status": "running"}
+    else:
+        raise HTTPException(status_code=404, detail="job not found")
 @app.get("/download/{job_id}")
 async def download_exam(job_id: str):
     """
     根据 job_id 返回对应的 PDF
-    路径约定：build/{job_id}/exam_filled.pdf
+    路径约定：build_jobs/{job_id}/build/exam_filled.pdf
     """
-    job_dir = BUILD_DIR / job_id
-    pdf_path = job_dir / "exam_filled.pdf"
+    # 优先从内存状态获取路径
+    if job_id in JOBS:
+        pdf_path_str = JOBS[job_id].get("pdf_path")
+        if pdf_path_str:
+            pdf_path = Path(pdf_path_str)
+            if pdf_path.exists():
+                return FileResponse(
+                    path=str(pdf_path),
+                    media_type="application/pdf",
+                    filename="exam_generated.pdf",
+                )
+    
+    # 向后兼容：从文件系统查找
+    job_dir = BUILD_ROOT / job_id
+    pdf_path = job_dir / "build" / "exam_filled.pdf"
 
     if not pdf_path.exists():
-        # 被前端看到就是 404 + "job not found"
-        raise HTTPException(status_code=404, detail="job not found")
+        raise HTTPException(status_code=404, detail="job not found or PDF not ready")
 
     return FileResponse(
         path=str(pdf_path),

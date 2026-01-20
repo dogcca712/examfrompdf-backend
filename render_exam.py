@@ -37,8 +37,8 @@ def sanitize_simple(q):
         "marks": q.get("marks", 1),
     }
 def main():
-    # 1. 读取 exam_data.json
-    with open(BASE_DIR / "exam_data.json", "r", encoding="utf-8") as f:
+    # 1. 读取 exam_data.json（支持环境变量指定路径）
+    with open(EXAM_DATA_PATH, "r", encoding="utf-8") as f:
         exam_data = json.load(f)
 
     # 2. 拆数据（给 LaTeX 用）
