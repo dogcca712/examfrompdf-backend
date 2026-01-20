@@ -37,9 +37,13 @@ def run_job(job_id: str, lecture_path: Path):
     job_dir = BUILD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # 把 lecture.pdf 固定放到 job_dir 里，避免并发互相覆盖
+    # lecture_path 已经在 job_dir 中了（在 /generate 端点中保存的）
+    # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
-    shutil.copy2(lecture_path, job_lecture)
+    if lecture_path != job_lecture:
+        shutil.copy2(lecture_path, job_lecture)
+    else:
+        job_lecture = lecture_path  # 已经是正确位置了
 
     # 统一输出在 job_dir/build 下
     (job_dir / "build").mkdir(exist_ok=True)
