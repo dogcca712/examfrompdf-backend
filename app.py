@@ -196,6 +196,86 @@ def migrate_db():
 migrate_db()
 
 
+# -------------------- 任务队列和并发控制（阶段1改进） --------------------
+# 并发限制：最多同时处理的任务数
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))  # 默认5个并发
+job_semaphore = Semaphore(MAX_CONCURRENT_JOBS)
+
+# 任务队列：排队等待执行的任务
+job_queue = queue.Queue()
+
+# 队列监控
+queue_stats = {
+    "current_queue_size": 0,
+    "max_queue_size": 0,
+    "current_processing": 0,
+    "max_processing": 0,
+    "total_processed": 0,
+    "total_failed": 0,
+}
+queue_stats_lock = Lock()  # 保护队列统计数据的锁
+
+def update_queue_stats(action: str, value: int = 1):
+    """更新队列统计信息"""
+    with queue_stats_lock:
+        if action == "enqueue":
+            queue_stats["current_queue_size"] += value
+            queue_stats["max_queue_size"] = max(
+                queue_stats["max_queue_size"], 
+                queue_stats["current_queue_size"]
+            )
+        elif action == "dequeue":
+            queue_stats["current_queue_size"] = max(0, queue_stats["current_queue_size"] - value)
+        elif action == "start_processing":
+            queue_stats["current_processing"] += value
+            queue_stats["max_processing"] = max(
+                queue_stats["max_processing"],
+                queue_stats["current_processing"]
+            )
+        elif action == "finish_processing":
+            queue_stats["current_processing"] = max(0, queue_stats["current_processing"] - value)
+            queue_stats["total_processed"] += value
+        elif action == "fail_processing":
+            queue_stats["current_processing"] = max(0, queue_stats["current_processing"] - value)
+            queue_stats["total_failed"] += value
+
+def worker_thread():
+    """
+    工作线程：从队列中取出任务并执行
+    多个任务会排队执行，但最多同时处理 MAX_CONCURRENT_JOBS 个
+    """
+    while True:
+        try:
+            # 从队列中获取任务（阻塞等待）
+            job_id, lecture_path = job_queue.get()
+            
+            # 获取信号量（如果已达到最大并发数，会阻塞等待）
+            job_semaphore.acquire()
+            update_queue_stats("dequeue")
+            update_queue_stats("start_processing")
+            
+            try:
+                logger.info(f"Worker thread: Starting job {job_id}")
+                run_job(job_id, lecture_path)
+                update_queue_stats("finish_processing")
+                logger.info(f"Worker thread: Completed job {job_id}")
+            except Exception as e:
+                update_queue_stats("fail_processing")
+                logger.error(f"Worker thread: Job {job_id} failed: {e}", exc_info=True)
+            finally:
+                # 释放信号量，允许下一个任务开始
+                job_semaphore.release()
+                job_queue.task_done()
+                
+        except Exception as e:
+            logger.error(f"Worker thread error: {e}", exc_info=True)
+
+# 启动工作线程（守护线程，主进程退出时自动退出）
+worker = threading.Thread(target=worker_thread, daemon=True)
+worker.start()
+logger.info(f"Task queue worker thread started (max concurrent: {MAX_CONCURRENT_JOBS})")
+
+
 # -------------------- 工具函数 --------------------
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -613,7 +693,7 @@ def run_job(job_id: str, lecture_path: Path):
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-    shutil.copy2(lecture_path, job_lecture)
+        shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -740,13 +820,13 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
     """
     try:
         # 验证文件类型
-    if lecture_pdf.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+        if lecture_pdf.content_type != "application/pdf":
+            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
         # 用量检查
         check_usage_limit(current_user["id"])
 
-    job_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -835,7 +915,7 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
             logger.error(f"Failed to queue job: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to queue job for processing")
 
-    return JSONResponse({"job_id": job_id})
+        return JSONResponse({"job_id": job_id})
     
     except HTTPException:
         raise
