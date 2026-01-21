@@ -141,7 +141,8 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
+                user_id INTEGER,  -- 允许NULL，用于匿名用户
+                device_fingerprint TEXT,  -- 匿名用户的设备指纹
                 file_name TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -162,10 +163,41 @@ def init_db():
             );
             """
         )
+        # 匿名用户追踪表（用于限制未登录用户）
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guest_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_fingerprint TEXT NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT,
+                date TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(device_fingerprint, date)
+            );
+            """
+        )
+        # 匿名用户到注册用户的关联表（用于注册时关联使用记录）
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guest_to_user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_fingerprint TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                associated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                UNIQUE(device_fingerprint, user_id)
+            );
+            """
+        )
         # 创建索引提升查询性能
         cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_guest_usage_fingerprint ON guest_usage(device_fingerprint)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_guest_usage_date ON guest_usage(date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_guest_to_user_fingerprint ON guest_to_user(device_fingerprint)")
 
 
 init_db()
@@ -408,9 +440,115 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     return {"id": user["id"], "email": user["email"], "token_jti": payload.get("jti")}
 
 
+def get_current_user_optional(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[Dict[str, Any]]:
+    """可选认证：如果有token则返回用户，否则返回None"""
+    if not credentials:
+        return None
+    try:
+        token = credentials.credentials
+        payload = decode_jwt(token)
+        user_id = int(payload.get("sub"))
+        user = get_user_by_id(user_id)
+        if not user:
+            return None
+        return {"id": user["id"], "email": user["email"], "token_jti": payload.get("jti")}
+    except Exception:
+        return None
+
+
+def get_device_fingerprint(request: Request) -> str:
+    """生成设备指纹：IP + User-Agent"""
+    ip = request.client.host if request.client else "unknown"
+    user_agent = request.headers.get("user-agent", "unknown")
+    # 使用hash确保隐私，同时保持一致性
+    fingerprint_str = f"{ip}:{user_agent}"
+    fingerprint = hashlib.sha256(fingerprint_str.encode()).hexdigest()[:32]  # 32字符足够
+    return fingerprint
+
+
+def check_guest_usage_limit(device_fingerprint: str) -> bool:
+    """检查匿名用户是否超过限制（每天只能使用1次）"""
+    today = date.today().isoformat()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT count FROM guest_usage 
+            WHERE device_fingerprint = ? AND date = ?
+            """,
+            (device_fingerprint, today)
+        )
+        row = cur.fetchone()
+        if row:
+            count = row[0]
+            if count >= 1:  # 匿名用户每天只能使用1次
+                return False
+        return True
+
+
+def record_guest_usage(device_fingerprint: str, ip_address: str, user_agent: str):
+    """记录匿名用户使用"""
+    today = date.today().isoformat()
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO guest_usage (device_fingerprint, ip_address, user_agent, date, count, created_at)
+            VALUES (?, ?, ?, ?, 1, ?)
+            ON CONFLICT(device_fingerprint, date) DO UPDATE SET
+                count = count + 1,
+                ip_address = ?,
+                user_agent = ?
+            """,
+            (device_fingerprint, ip_address, user_agent, today, now, ip_address, user_agent)
+        )
+
+
+def associate_guest_usage_to_user(device_fingerprint: str, user_id: int):
+    """用户注册时，关联匿名使用记录到用户账户"""
+    today = date.today().isoformat()
+    now = datetime.utcnow().isoformat()
+    
+    with get_db() as conn:
+        cur = conn.cursor()
+        # 检查今天是否有匿名使用记录
+        cur.execute(
+            """
+            SELECT count FROM guest_usage 
+            WHERE device_fingerprint = ? AND date = ?
+            """,
+            (device_fingerprint, today)
+        )
+        row = cur.fetchone()
+        
+        if row and row[0] > 0:
+            # 有匿名使用记录，关联到用户并消耗免费额度
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO guest_to_user (device_fingerprint, user_id, associated_at)
+                VALUES (?, ?, ?)
+                """,
+                (device_fingerprint, user_id, now)
+            )
+            # 将匿名使用记录转移到用户使用记录
+            cur.execute(
+                """
+                INSERT INTO usage (user_id, date, count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, date) DO UPDATE SET
+                    count = count + ?
+                """,
+                (user_id, today, row[0], row[0])
+            )
+            logger.info(f"Associated guest usage ({row[0]} times) to user {user_id}")
+            return row[0]
+    return 0
+
+
 # -------------------- 认证 API --------------------
 @app.post("/auth/register")
-async def register(payload: Dict[str, str]):
+async def register(request: Request, payload: Dict[str, str]):
     email = (payload.get("email") or "").strip().lower()
     password = payload.get("password") or ""
     if not email or not password:
@@ -428,6 +566,13 @@ async def register(payload: Dict[str, str]):
             (email, password_hash, datetime.utcnow().isoformat()),
         )
         user_id = cur.lastrowid
+    
+    # 关联匿名使用记录（如果存在）
+    device_fingerprint = get_device_fingerprint(request)
+    guest_usage_count = associate_guest_usage_to_user(device_fingerprint, user_id)
+    if guest_usage_count > 0:
+        logger.info(f"Associated {guest_usage_count} guest usage(s) to new user {user_id}")
+    
     logger.info(f"User registered: {email} (id: {user_id})")
 
     token = generate_jwt(user_id, email)
@@ -876,35 +1021,84 @@ async def get_queue_status(current_user=Depends(get_current_user)):
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
 @app.post("/generate")
-async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depends(get_current_user)):
+async def generate_exam(
+    request: Request,
+    lecture_pdf: UploadFile = File(...), 
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
     """
-    生成考试PDF（商用级：添加文件大小检查和错误处理）
+    生成考试PDF（支持匿名用户和认证用户）
+    - 认证用户：检查用量限制
+    - 匿名用户：每天只能使用1次（通过设备指纹识别）
     """
     try:
         # 验证文件类型
         if lecture_pdf.content_type != "application/pdf":
             raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
-        # 用量检查
-        check_usage_limit(current_user["id"])
+        # 判断是认证用户还是匿名用户
+        if current_user:
+            # 认证用户：检查用量限制
+            check_usage_limit(current_user["id"])
+            user_id = current_user["id"]
+            user_type = "authenticated"
+            logger.info(f"Authenticated user {user_id} requesting job")
+        else:
+            # 匿名用户：检查设备指纹限制
+            device_fingerprint = get_device_fingerprint(request)
+            ip_address = request.client.host if request.client else "unknown"
+            user_agent = request.headers.get("user-agent", "unknown")
+            
+            if not check_guest_usage_limit(device_fingerprint):
+                raise HTTPException(
+                    status_code=429, 
+                    detail="Anonymous users can only generate one exam per day. Please register for more."
+                )
+            
+            # 使用特殊用户ID 0 表示匿名用户（或创建临时用户记录）
+            # 但为了数据库完整性，我们使用一个特殊的guest用户ID
+            # 或者直接在jobs表中使用NULL，但需要修改表结构
+            # 暂时使用0作为guest user_id，但需要确保数据库允许
+            user_id = 0  # 匿名用户
+            user_type = "guest"
+            logger.info(f"Guest user (fingerprint: {device_fingerprint[:8]}...) requesting job")
+            
+            # 记录匿名使用（在创建job之前，如果失败不会记录）
+            # 注意：这里先不记录，等job创建成功后再记录
 
         job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
-        logger.info(f"Starting job {job_id} for user {current_user['id']}, file: {file_name}")
+        logger.info(f"Starting job {job_id} for {user_type} user {user_id}, file: {file_name}")
         
         # 保存到数据库（商用级：移除内存状态，完全依赖数据库）
         try:
             with get_db() as conn:
                 cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO jobs (id, user_id, file_name, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (job_id, current_user["id"], file_name, "queued", created_at, created_at),
-                )
+                if current_user:
+                    # 认证用户
+                    cur.execute(
+                        """
+                        INSERT INTO jobs (id, user_id, file_name, status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (job_id, user_id, file_name, "queued", created_at, created_at),
+                    )
+                else:
+                    # 匿名用户：记录设备指纹
+                    device_fingerprint = get_device_fingerprint(request)
+                    cur.execute(
+                        """
+                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (job_id, None, device_fingerprint, file_name, "queued", created_at, created_at),
+                    )
+                    # 记录匿名使用（job创建成功后才记录）
+                    ip_address = request.client.host if request.client else "unknown"
+                    user_agent = request.headers.get("user-agent", "unknown")
+                    record_guest_usage(device_fingerprint, ip_address, user_agent)
             logger.info(f"Job {job_id} created in database")
         except Exception as e:
             logger.error(f"Failed to create job in database: {e}", exc_info=True)
@@ -956,12 +1150,13 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
                 pass
             raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
-        # 用量计数 +1
-        try:
-            upsert_usage(current_user["id"])
-        except Exception as e:
-            logger.warning(f"Failed to update usage count: {e}", exc_info=True)
-            # 不影响主流程，继续执行
+        # 用量计数 +1（仅认证用户）
+        if current_user:
+            try:
+                upsert_usage(current_user["id"])
+            except Exception as e:
+                logger.warning(f"Failed to update usage count: {e}", exc_info=True)
+                # 不影响主流程，继续执行
 
         # 将任务加入队列（阶段1改进：使用队列和并发控制）
         try:
@@ -985,17 +1180,30 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
         logger.error(f"Unexpected error in generate_exam: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 @app.get("/status/{job_id}")
-async def job_status(job_id: str, current_user=Depends(get_current_user)):
+async def job_status(
+    request: Request,
+    job_id: str, 
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
     """
-    查询 job 状态（商用级：完全从数据库读取）
+    查询 job 状态（支持匿名用户和认证用户）
     """
     # 从数据库读取任务状态
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT status, error, download_url FROM jobs WHERE id = ? AND user_id = ?",
-            (job_id, current_user["id"]),
-        )
+        if current_user:
+            # 认证用户：通过user_id查询
+            cur.execute(
+                "SELECT status, error, download_url FROM jobs WHERE id = ? AND user_id = ?",
+                (job_id, current_user["id"]),
+            )
+        else:
+            # 匿名用户：通过device_fingerprint查询
+            device_fingerprint = get_device_fingerprint(request)
+            cur.execute(
+                "SELECT status, error, download_url FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
+                (job_id, device_fingerprint),
+            )
         row = cur.fetchone()
     
     if not row:
@@ -1012,18 +1220,31 @@ async def job_status(job_id: str, current_user=Depends(get_current_user)):
     else:
         return {"status": status}
 @app.get("/download/{job_id}")
-async def download_exam(job_id: str, current_user=Depends(get_current_user)):
+async def download_exam(
+    request: Request,
+    job_id: str, 
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
     """
-    根据 job_id 返回对应的 PDF
+    根据 job_id 返回对应的 PDF（支持匿名用户和认证用户）
     路径约定：build_jobs/{job_id}/build/exam_filled.pdf
     """
-    # 从数据库验证任务存在且属于当前用户（商用级：移除内存状态）
+    # 从数据库验证任务存在且属于当前用户或匿名设备（商用级：移除内存状态）
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT status, download_url FROM jobs WHERE id = ? AND user_id = ?",
-            (job_id, current_user["id"]),
-        )
+        if current_user:
+            # 认证用户：通过user_id查询
+            cur.execute(
+                "SELECT status, download_url FROM jobs WHERE id = ? AND user_id = ?",
+                (job_id, current_user["id"]),
+            )
+        else:
+            # 匿名用户：通过device_fingerprint查询
+            device_fingerprint = get_device_fingerprint(request)
+            cur.execute(
+                "SELECT status, download_url FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
+                (job_id, device_fingerprint),
+            )
         row = cur.fetchone()
     
     if not row:
