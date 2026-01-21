@@ -16,6 +16,15 @@ import sqlite3
 import jwt
 import bcrypt
 import stripe
+import logging
+from contextlib import contextmanager
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
 BUILD_ROOT = BASE_DIR / "build_jobs"
@@ -27,7 +36,7 @@ JWT_SECRET = os.environ.get("JWT_SECRET", "change_me")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_HOURS = 24
 security = HTTPBearer(auto_error=False)
-TOKEN_BLACKLIST = set()  # 简单的内存黑名单
+# Token黑名单改用数据库表（见init_db中的revoked_tokens表）
 
 # Stripe 配置
 STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
@@ -64,20 +73,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 内存 Job 状态（MVP 够用；以后可换 Redis / DB）
-JOBS = {}  # job_id -> dict(status, error, pdf_path, created_at, user_id)
+# 移除内存状态，完全依赖数据库（商用级改进）
+# 所有任务状态从数据库读取，支持多实例部署和持久化
 
 
-# -------------------- 数据库工具 --------------------
+# -------------------- 数据库工具（商用级改进） --------------------
+# 使用上下文管理器确保连接正确关闭
+@contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    """数据库连接上下文管理器，确保连接正确关闭"""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Database error: {e}", exc_info=True)
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
-    conn = get_db()
-    cur = conn.cursor()
+    with get_db() as conn:
+        cur = conn.cursor()
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -95,7 +115,7 @@ def init_db():
             user_id INTEGER NOT NULL,
             plan TEXT NOT NULL,
             stripe_customer_id TEXT,
-            stripe_subscription_id TEXT,
+            stripe_subscription_id TEXT UNIQUE,
             status TEXT,
             current_period_end INTEGER,
             created_at TEXT DEFAULT (datetime('now')),
@@ -125,12 +145,25 @@ def init_db():
             created_at TEXT NOT NULL,
             download_url TEXT,
             error TEXT,
+            updated_at TEXT,
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
         """
     )
-    conn.commit()
-    conn.close()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS revoked_tokens (
+            jti TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            revoked_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        """
+    )
+        # 创建索引提升查询性能
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)")
 
 
 init_db()
@@ -163,8 +196,12 @@ def decode_jwt(token: str) -> Dict[str, Any]:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         jti = payload.get("jti")
-        if jti in TOKEN_BLACKLIST:
-            raise HTTPException(status_code=401, detail="Token revoked")
+        # 检查数据库中的黑名单（商用级改进）
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT jti FROM revoked_tokens WHERE jti = ?", (jti,))
+            if cur.fetchone():
+                raise HTTPException(status_code=401, detail="Token revoked")
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -173,71 +210,62 @@ def decode_jwt(token: str) -> Dict[str, Any]:
 
 
 def get_user_by_email(email: str) -> Optional[sqlite3.Row]:
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE email = ?", (email.lower(),))
-    row = cur.fetchone()
-    conn.close()
-    return row
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE email = ?", (email.lower(),))
+        return cur.fetchone()
 
 
 def get_user_by_id(user_id: int) -> Optional[sqlite3.Row]:
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        return cur.fetchone()
 
 
 def upsert_usage(user_id: int):
     today = date.today().isoformat()
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO usage (user_id, date, count) VALUES (?, ?, 1)
-        ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
-        """,
-        (user_id, today),
-    )
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO usage (user_id, date, count) VALUES (?, ?, 1)
+            ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
+            """,
+            (user_id, today),
+        )
 
 
 def get_usage_counts(user_id: int):
     today = date.today().isoformat()
     month_prefix = today[:7]  # YYYY-MM
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT count FROM usage WHERE user_id = ? AND date = ?", (user_id, today))
-    row = cur.fetchone()
-    daily_count = row["count"] if row else 0
-    cur.execute(
-        "SELECT SUM(count) as total FROM usage WHERE user_id = ? AND date LIKE ?",
-        (user_id, f"{month_prefix}-%"),
-    )
-    row2 = cur.fetchone()
-    monthly_count = row2["total"] if row2 and row2["total"] else 0
-    conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT count FROM usage WHERE user_id = ? AND date = ?", (user_id, today))
+        row = cur.fetchone()
+        daily_count = row["count"] if row else 0
+        cur.execute(
+            "SELECT SUM(count) as total FROM usage WHERE user_id = ? AND date LIKE ?",
+            (user_id, f"{month_prefix}-%"),
+        )
+        row2 = cur.fetchone()
+        monthly_count = row2["total"] if row2 and row2["total"] else 0
     return daily_count, monthly_count
 
 
 def get_active_subscription(user_id: int) -> Optional[sqlite3.Row]:
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM subscriptions
-        WHERE user_id = ?
-        ORDER BY current_period_end DESC NULLS LAST
-        LIMIT 1
-        """,
-        (user_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return row
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM subscriptions
+            WHERE user_id = ?
+            ORDER BY current_period_end DESC NULLS LAST
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        return cur.fetchone()
 
 
 def get_plan_for_user(user_id: int) -> str:
@@ -286,15 +314,14 @@ async def register(payload: Dict[str, str]):
         raise HTTPException(status_code=400, detail="Email already registered")
 
     password_hash = hash_password(password)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-        (email, password_hash, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    user_id = cur.lastrowid
-    conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+            (email, password_hash, datetime.utcnow().isoformat()),
+        )
+        user_id = cur.lastrowid
+    logger.info(f"User registered: {email} (id: {user_id})")
 
     token = generate_jwt(user_id, email)
     plan = get_plan_for_user(user_id)
@@ -335,9 +362,16 @@ async def auth_me(current_user=Depends(get_current_user)):
 
 @app.post("/auth/logout")
 async def logout(current_user=Depends(get_current_user)):
+    """登出：将token加入数据库黑名单（商用级改进）"""
     jti = current_user.get("token_jti")
     if jti:
-        TOKEN_BLACKLIST.add(jti)
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT OR IGNORE INTO revoked_tokens (jti, user_id, revoked_at) VALUES (?, ?, ?)",
+                (jti, current_user["id"], datetime.utcnow().isoformat()),
+            )
+    logger.info(f"User logged out: {current_user['email']}")
     return {"success": True}
 
 
@@ -381,17 +415,22 @@ def upsert_subscription(
     status: str,
     current_period_end: Optional[int],
 ):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO subscriptions (user_id, plan, stripe_customer_id, stripe_subscription_id, status, current_period_end)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (user_id, plan, customer_id, subscription_id, status, current_period_end),
-    )
-    conn.commit()
-    conn.close()
+    """更新或插入订阅信息（使用INSERT OR REPLACE确保数据一致性）"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        # 如果已存在相同subscription_id，则更新；否则插入
+        cur.execute(
+            """
+            INSERT INTO subscriptions (user_id, plan, stripe_customer_id, stripe_subscription_id, status, current_period_end)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(stripe_subscription_id) DO UPDATE SET
+                plan = excluded.plan,
+                status = excluded.status,
+                current_period_end = excluded.current_period_end
+            """,
+            (user_id, plan, customer_id, subscription_id, status, current_period_end),
+        )
+    logger.info(f"Subscription updated: user_id={user_id}, plan={plan}, status={status}")
 
 
 @app.post("/payments/webhook")
@@ -481,7 +520,7 @@ async def usage_status(current_user=Depends(get_current_user)):
 @app.get("/jobs")
 async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offset: int = 0):
     """
-    获取用户的历史任务列表
+    获取用户的历史任务列表（商用级：完全从数据库读取）
     返回格式：
     {
         "jobs": [
@@ -498,20 +537,24 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
         "total": 10
     }
     """
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, file_name, status, created_at, download_url, error
-        FROM jobs
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-        LIMIT ? OFFSET ?
-        """,
-        (current_user["id"], limit, offset),
-    )
-    rows = cur.fetchall()
-    conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        # 先获取总数
+        cur.execute("SELECT COUNT(*) as total FROM jobs WHERE user_id = ?", (current_user["id"],))
+        total = cur.fetchone()["total"]
+        
+        # 获取任务列表
+        cur.execute(
+            """
+            SELECT id, file_name, status, created_at, download_url, error
+            FROM jobs
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (current_user["id"], limit, offset),
+        )
+        rows = cur.fetchall()
     
     jobs = []
     for row in rows:
@@ -529,12 +572,12 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
         
         jobs.append(job)
     
-    return {"jobs": jobs, "total": len(jobs)}
+    return {"jobs": jobs, "total": total}
 
 def run_job(job_id: str, lecture_path: Path):
     """
     后台执行：PDF -> exam_data.json -> render_exam.py -> pdflatex -> PDF
-    结果写入 JOBS[job_id]
+    结果写入数据库（商用级改进：移除内存状态）
     """
     job_dir = BUILD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -551,19 +594,16 @@ def run_job(job_id: str, lecture_path: Path):
     (job_dir / "build").mkdir(exist_ok=True)
 
     try:
-        JOBS[job_id]["status"] = "running"
-        
-        # 更新数据库状态
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE jobs SET status = ? WHERE id = ?
-            """,
-            ("running", job_id),
-        )
-        conn.commit()
-        conn.close()
+        # 更新数据库状态（商用级：移除内存状态）
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?
+                """,
+                ("running", datetime.utcnow().isoformat(), job_id),
+            )
+        logger.info(f"Job {job_id} started processing")
 
         # 1) 生成 JSON - 直接输出到 job_dir，避免并发冲突
         job_exam_data_json = job_dir / "exam_data.json"
@@ -617,50 +657,30 @@ def run_job(job_id: str, lecture_path: Path):
         if not pdf_path.exists():
             raise RuntimeError("PDF was not generated.")
 
-        JOBS[job_id]["status"] = "done"
-        JOBS[job_id]["pdf_path"] = str(pdf_path)
-        
-        # 更新数据库
-        conn = get_db()
-        cur = conn.cursor()
+        # 更新数据库（商用级：移除内存状态）
         download_url = f"/download/{job_id}"
-        cur.execute(
-            """
-            UPDATE jobs SET status = ?, download_url = ? WHERE id = ?
-            """,
-            ("done", download_url, job_id),
-        )
-        conn.commit()
-        conn.close()
-        
-        # 更新数据库
-        conn = get_db()
-        cur = conn.cursor()
-        download_url = f"/download/{job_id}"
-        cur.execute(
-            """
-            UPDATE jobs SET status = ?, download_url = ? WHERE id = ?
-            """,
-            ("done", download_url, job_id),
-        )
-        conn.commit()
-        conn.close()
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE jobs SET status = ?, download_url = ?, updated_at = ? WHERE id = ?
+                """,
+                ("done", download_url, datetime.utcnow().isoformat(), job_id),
+            )
+        logger.info(f"Job {job_id} completed successfully")
 
     except Exception as e:
-        JOBS[job_id]["status"] = "failed"
-        JOBS[job_id]["error"] = str(e)
-        
-        # 更新数据库
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE jobs SET status = ?, error = ? WHERE id = ?
-            """,
-            ("failed", str(e), job_id),
-        )
-        conn.commit()
-        conn.close()
+        error_msg = str(e)
+        # 更新数据库（商用级：移除内存状态）
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?
+                """,
+                ("failed", error_msg, datetime.utcnow().isoformat(), job_id),
+            )
+        logger.error(f"Job {job_id} failed: {error_msg}", exc_info=True)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -692,28 +712,20 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
     check_usage_limit(current_user["id"])
 
     job_id = str(uuid.uuid4())
+    file_name = lecture_pdf.filename or "lecture.pdf"
+    created_at = datetime.utcnow().isoformat()
     
-    # 初始化 job 状态（内存）
-    JOBS[job_id] = {
-        "status": "queued",
-        "error": None,
-        "pdf_path": None,
-        "created_at": time.time(),
-        "user_id": current_user["id"],
-    }
-    
-    # 保存到数据库
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO jobs (id, user_id, file_name, status, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (job_id, current_user["id"], lecture_pdf.filename or "lecture.pdf", "queued", datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    # 保存到数据库（商用级：移除内存状态，完全依赖数据库）
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO jobs (id, user_id, file_name, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (job_id, current_user["id"], file_name, "queued", created_at, created_at),
+        )
+    logger.info(f"Job created: {job_id} for user {current_user['id']}, file: {file_name}")
     
     # 使用 BUILD_ROOT 保持一致性
     job_dir = BUILD_ROOT / job_id
@@ -735,66 +747,58 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
 @app.get("/status/{job_id}")
 async def job_status(job_id: str, current_user=Depends(get_current_user)):
     """
-    查询 job 状态
+    查询 job 状态（商用级：完全从数据库读取）
     """
-    # 先检查内存中的状态
-    if job_id in JOBS:
-        job = JOBS[job_id]
-        if job.get("user_id") and job["user_id"] != current_user["id"]:
-            raise HTTPException(status_code=403, detail="Forbidden")
-        status = job.get("status", "unknown")
-        
-        # 如果状态是 done，返回 PDF 路径
-        if status == "done":
-            return {
-                "status": "done"
-            }
-        elif status == "failed":
-            return {
-                "status": "failed",
-                "error": job.get("error", "Unknown error")
-            }
-        else:
-            return {"status": status}
+    # 从数据库读取任务状态
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT status, error, download_url FROM jobs WHERE id = ? AND user_id = ?",
+            (job_id, current_user["id"]),
+        )
+        row = cur.fetchone()
     
-    # 如果内存中没有，检查文件系统（向后兼容）
-    job_dir = BUILD_ROOT / job_id
-    pdf_path = job_dir / "build" / "exam_filled.pdf"
-
-    if pdf_path.exists():
-        return {
-            "status": "done"
-        }
-    elif job_dir.exists():
-        return {"status": "running"}
-    else:
+    if not row:
         raise HTTPException(status_code=404, detail="job not found")
+    
+    status = row["status"]
+    if status == "done":
+        return {"status": "done"}
+    elif status == "failed":
+        return {
+            "status": "failed",
+            "error": row["error"] or "Unknown error"
+        }
+    else:
+        return {"status": status}
 @app.get("/download/{job_id}")
 async def download_exam(job_id: str, current_user=Depends(get_current_user)):
     """
     根据 job_id 返回对应的 PDF
     路径约定：build_jobs/{job_id}/build/exam_filled.pdf
     """
-    # 优先从内存状态获取路径
-    if job_id in JOBS:
-        pdf_path_str = JOBS[job_id].get("pdf_path")
-        if JOBS[job_id].get("user_id") and JOBS[job_id]["user_id"] != current_user["id"]:
-            raise HTTPException(status_code=403, detail="Forbidden")
-        if pdf_path_str:
-            pdf_path = Path(pdf_path_str)
-            if pdf_path.exists():
-                return FileResponse(
-                    path=str(pdf_path),
-                    media_type="application/pdf",
-                    filename="exam_generated.pdf",
-                )
+    # 从数据库验证任务存在且属于当前用户（商用级：移除内存状态）
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT status, download_url FROM jobs WHERE id = ? AND user_id = ?",
+            (job_id, current_user["id"]),
+        )
+        row = cur.fetchone()
     
-    # 向后兼容：从文件系统查找
+    if not row:
+        raise HTTPException(status_code=404, detail="job not found")
+    
+    if row["status"] != "done":
+        raise HTTPException(status_code=400, detail="Job not completed yet")
+    
+    # 从文件系统读取PDF
     job_dir = BUILD_ROOT / job_id
     pdf_path = job_dir / "build" / "exam_filled.pdf"
 
     if not pdf_path.exists():
-        raise HTTPException(status_code=404, detail="job not found or PDF not ready")
+        logger.error(f"PDF file not found for job {job_id} at {pdf_path}")
+        raise HTTPException(status_code=404, detail="PDF file not found")
 
     return FileResponse(
         path=str(pdf_path),
