@@ -883,7 +883,7 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
     try:
         # 验证文件类型
         if lecture_pdf.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
         # 用量检查
         check_usage_limit(current_user["id"])
