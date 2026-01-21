@@ -20,6 +20,7 @@ import logging
 from contextlib import contextmanager
 import queue
 from threading import Semaphore, Lock
+import hashlib
 
 # 配置日志
 logging.basicConfig(
