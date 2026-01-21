@@ -693,7 +693,7 @@ def run_job(job_id: str, lecture_path: Path):
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -807,7 +807,33 @@ async def index():
 
 @app.get("/health")
 async def health():
+    """健康检查端点（公开，无需认证）"""
     return {"status": "ok"}
+
+
+@app.get("/queue/status/public")
+async def get_queue_status_public():
+    """
+    获取任务队列状态（公开端点，用于监控，无需认证）
+    注意：这是监控端点，不包含敏感信息
+    """
+    with queue_stats_lock:
+        stats = queue_stats.copy()
+    
+    # 计算预估等待时间（假设每个任务平均2分钟）
+    avg_task_time = 120  # 秒
+    estimated_wait = stats["current_queue_size"] * avg_task_time / MAX_CONCURRENT_JOBS
+    
+    return {
+        "queue_size": stats["current_queue_size"],
+        "max_queue_size": stats["max_queue_size"],
+        "processing": stats["current_processing"],
+        "max_processing": stats["max_processing"],
+        "max_concurrent": MAX_CONCURRENT_JOBS,
+        "total_processed": stats["total_processed"],
+        "total_failed": stats["total_failed"],
+        "estimated_wait_time": int(estimated_wait),
+    }
 
 
 # -------------------- 队列监控 API --------------------
@@ -856,13 +882,13 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
     """
     try:
         # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    if lecture_pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
         # 用量检查
         check_usage_limit(current_user["id"])
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -951,7 +977,7 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
             logger.error(f"Failed to queue job: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to queue job for processing")
 
-        return JSONResponse({"job_id": job_id})
+    return JSONResponse({"job_id": job_id})
     
     except HTTPException:
         raise
