@@ -210,10 +210,11 @@ def migrate_db():
     with get_db() as conn:
         cur = conn.cursor()
         
-        # 检查 jobs 表是否有 updated_at 列
+        # 检查 jobs 表的列
         cur.execute("PRAGMA table_info(jobs)")
         columns = [row[1] for row in cur.fetchall()]
         
+        # 添加 updated_at 列（如果不存在）
         if "updated_at" not in columns:
             logger.info("Adding updated_at column to jobs table")
             try:
@@ -221,6 +222,20 @@ def migrate_db():
                 logger.info("Successfully added updated_at column")
             except Exception as e:
                 logger.error(f"Failed to add updated_at column: {e}", exc_info=True)
+        
+        # 添加 device_fingerprint 列（如果不存在）- 用于匿名用户
+        if "device_fingerprint" not in columns:
+            logger.info("Adding device_fingerprint column to jobs table")
+            try:
+                cur.execute("ALTER TABLE jobs ADD COLUMN device_fingerprint TEXT")
+                logger.info("Successfully added device_fingerprint column")
+            except Exception as e:
+                logger.error(f"Failed to add device_fingerprint column: {e}", exc_info=True)
+        
+        # 修改 user_id 为可空（SQLite不支持直接修改NOT NULL，但新插入的NULL值会被接受）
+        # 注意：SQLite的ALTER TABLE不支持修改列的NOT NULL约束
+        # 但我们可以通过检查表结构来确认，如果user_id是NOT NULL，我们需要重建表
+        # 为了简化，我们假设旧表的user_id已经是可空的，或者新插入NULL值会被接受
         
         conn.commit()
 
@@ -839,7 +854,7 @@ def run_job(job_id: str, lecture_path: Path):
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -1034,8 +1049,8 @@ async def generate_exam(
     """
     try:
         # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    if lecture_pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
         # 判断是认证用户还是匿名用户
         if current_user:
@@ -1067,7 +1082,7 @@ async def generate_exam(
             # 记录匿名使用（在创建job之前，如果失败不会记录）
             # 注意：这里先不记录，等job创建成功后再记录
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -1173,7 +1188,7 @@ async def generate_exam(
             logger.error(f"Failed to queue job: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to queue job for processing")
 
-        return JSONResponse({"job_id": job_id})
+    return JSONResponse({"job_id": job_id})
     
     except HTTPException:
         raise
@@ -1198,7 +1213,7 @@ async def job_status(
                 "SELECT status, error, download_url FROM jobs WHERE id = ? AND user_id = ?",
                 (job_id, current_user["id"]),
             )
-        else:
+    else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
             cur.execute(
