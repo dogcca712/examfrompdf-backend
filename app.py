@@ -1142,7 +1142,7 @@ async def generate_exam(
             # 记录匿名使用（在创建job之前，如果失败不会记录）
             # 注意：这里先不记录，等job创建成功后再记录
 
-    job_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
