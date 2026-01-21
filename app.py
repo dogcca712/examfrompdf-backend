@@ -615,6 +615,21 @@ def associate_guest_usage_to_user(device_fingerprint: str, user_id: int):
                 """,
                 (user_id, today, row[0], row[0])
             )
+            
+            # 重要：将匿名用户创建的job的user_id更新为当前用户
+            # 这样注册后就能在历史记录中看到这些job
+            cur.execute(
+                """
+                UPDATE jobs 
+                SET user_id = ? 
+                WHERE device_fingerprint = ? AND user_id IS NULL
+                """,
+                (user_id, device_fingerprint)
+            )
+            updated_jobs = cur.rowcount
+            if updated_jobs > 0:
+                logger.info(f"Updated {updated_jobs} anonymous job(s) to user {user_id}")
+            
             logger.info(f"Associated guest usage ({row[0]} times) to user {user_id}")
             return row[0]
     return 0
