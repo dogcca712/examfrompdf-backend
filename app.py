@@ -283,7 +283,15 @@ async def register(payload: Dict[str, str]):
     conn.close()
 
     token = generate_jwt(user_id, email)
-    return {"token": token}
+    plan = get_plan_for_user(user_id)
+    return {
+        "access_token": token,
+        "user": {
+            "id": user_id,
+            "email": email,
+            "plan": plan
+        }
+    }
 
 
 @app.post("/auth/login")
@@ -294,7 +302,15 @@ async def login(payload: Dict[str, str]):
     if not user or not verify_password(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = generate_jwt(user["id"], user["email"])
-    return {"token": token}
+    plan = get_plan_for_user(user["id"])
+    return {
+        "access_token": token,
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "plan": plan
+        }
+    }
 
 
 @app.get("/auth/me")
