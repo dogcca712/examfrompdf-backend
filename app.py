@@ -476,6 +476,61 @@ async def usage_status(current_user=Depends(get_current_user)):
         "can_generate": can_generate,
     }
 
+
+# -------------------- 任务历史 API --------------------
+@app.get("/jobs")
+async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offset: int = 0):
+    """
+    获取用户的历史任务列表
+    返回格式：
+    {
+        "jobs": [
+            {
+                "id": "job_id",
+                "jobId": "job_id",
+                "fileName": "lecture.pdf",
+                "status": "done",
+                "createdAt": "2026-01-21T10:00:00",
+                "downloadUrl": "/download/job_id",
+                "error": null
+            }
+        ],
+        "total": 10
+    }
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, file_name, status, created_at, download_url, error
+        FROM jobs
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (current_user["id"], limit, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    
+    jobs = []
+    for row in rows:
+        job = {
+            "id": row["id"],
+            "jobId": row["id"],  # 兼容前端字段名
+            "fileName": row["file_name"],
+            "status": row["status"],
+            "createdAt": row["created_at"],
+        }
+        if row["download_url"]:
+            job["downloadUrl"] = row["download_url"]
+        if row["error"]:
+            job["error"] = row["error"]
+        
+        jobs.append(job)
+    
+    return {"jobs": jobs, "total": len(jobs)}
+
 def run_job(job_id: str, lecture_path: Path):
     """
     后台执行：PDF -> exam_data.json -> render_exam.py -> pdflatex -> PDF
@@ -564,6 +619,19 @@ def run_job(job_id: str, lecture_path: Path):
 
         JOBS[job_id]["status"] = "done"
         JOBS[job_id]["pdf_path"] = str(pdf_path)
+        
+        # 更新数据库
+        conn = get_db()
+        cur = conn.cursor()
+        download_url = f"/download/{job_id}"
+        cur.execute(
+            """
+            UPDATE jobs SET status = ?, download_url = ? WHERE id = ?
+            """,
+            ("done", download_url, job_id),
+        )
+        conn.commit()
+        conn.close()
         
         # 更新数据库
         conn = get_db()
