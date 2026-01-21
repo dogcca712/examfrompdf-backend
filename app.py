@@ -169,6 +169,31 @@ def init_db():
 init_db()
 
 
+# -------------------- 数据库迁移 --------------------
+def migrate_db():
+    """数据库迁移：添加缺失的列"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        
+        # 检查 jobs 表是否有 updated_at 列
+        cur.execute("PRAGMA table_info(jobs)")
+        columns = [row[1] for row in cur.fetchall()]
+        
+        if "updated_at" not in columns:
+            logger.info("Adding updated_at column to jobs table")
+            try:
+                cur.execute("ALTER TABLE jobs ADD COLUMN updated_at TEXT")
+                logger.info("Successfully added updated_at column")
+            except Exception as e:
+                logger.error(f"Failed to add updated_at column: {e}", exc_info=True)
+        
+        conn.commit()
+
+
+# 运行迁移
+migrate_db()
+
+
 # -------------------- 工具函数 --------------------
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -586,7 +611,7 @@ def run_job(job_id: str, lecture_path: Path):
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
