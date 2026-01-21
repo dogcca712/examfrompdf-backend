@@ -914,7 +914,7 @@ def run_job(job_id: str, lecture_path: Path):
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-    shutil.copy2(lecture_path, job_lecture)
+        shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -1255,7 +1255,7 @@ async def generate_exam(
             logger.error(f"Failed to queue job: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to queue job for processing")
 
-    return JSONResponse({"job_id": job_id})
+        return JSONResponse({"job_id": job_id})
     
     except HTTPException:
         raise
