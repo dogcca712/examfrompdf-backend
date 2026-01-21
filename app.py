@@ -804,7 +804,7 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
             logger.error(f"Failed to start background job: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to start processing")
 
-    return JSONResponse({"job_id": job_id})
+        return JSONResponse({"job_id": job_id})
     
     except HTTPException:
         raise
