@@ -693,7 +693,7 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
 
     job_id = str(uuid.uuid4())
     
-    # 初始化 job 状态
+    # 初始化 job 状态（内存）
     JOBS[job_id] = {
         "status": "queued",
         "error": None,
@@ -701,6 +701,19 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
         "created_at": time.time(),
         "user_id": current_user["id"],
     }
+    
+    # 保存到数据库
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO jobs (id, user_id, file_name, status, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (job_id, current_user["id"], lecture_pdf.filename or "lecture.pdf", "queued", datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
     
     # 使用 BUILD_ROOT 保持一致性
     job_dir = BUILD_ROOT / job_id
