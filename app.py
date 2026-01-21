@@ -48,6 +48,8 @@ PLAN_LIMITS = {
 ALLOWED_ORIGINS = [
     "https://examfrompdf.com",
     "https://www.examfrompdf.com",
+    "https://examfrompdfcom.lovable.app",  # 已发布域名
+    "https://672fee75-aabe-4860-9b0b-5f907b22109b.lovableproject.com",  # 预览域名
 ]
 ALLOWED_ORIGIN_REGEX = r"https://.*\.lovable\.app"
 
