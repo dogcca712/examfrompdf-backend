@@ -586,7 +586,7 @@ def run_job(job_id: str, lecture_path: Path):
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -713,13 +713,13 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
     """
     try:
         # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    if lecture_pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
         # 用量检查
         check_usage_limit(current_user["id"])
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -755,9 +755,10 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
         try:
             with lecture_path.open("wb") as f:
                 # 分块读取，避免内存问题，同时检查大小
+                # 使用 read() 方法（同步，但在异步上下文中可以接受）
                 chunk_size = 8192  # 8KB chunks
                 while True:
-                    chunk = await lecture_pdf.read(chunk_size)
+                    chunk = lecture_pdf.file.read(chunk_size)
                     if not chunk:
                         break
                     file_size += len(chunk)
@@ -803,7 +804,7 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
             logger.error(f"Failed to start background job: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to start processing")
 
-        return JSONResponse({"job_id": job_id})
+    return JSONResponse({"job_id": job_id})
     
     except HTTPException:
         raise
@@ -826,7 +827,7 @@ async def job_status(job_id: str, current_user=Depends(get_current_user)):
     
     if not row:
         raise HTTPException(status_code=404, detail="job not found")
-    
+
     status = row["status"]
     if status == "done":
         return {"status": "done"}
