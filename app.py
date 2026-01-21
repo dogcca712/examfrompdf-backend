@@ -1167,18 +1167,19 @@ async def generate_exam(
         try:
             with get_db() as conn:
                 cur = conn.cursor()
+                # 无论认证用户还是匿名用户，都保存设备指纹，用于备用验证
+                device_fingerprint = get_device_fingerprint(request)
                 if current_user:
-                    # 认证用户
+                    # 认证用户：同时保存user_id和设备指纹
                     cur.execute(
                         """
-                        INSERT INTO jobs (id, user_id, file_name, status, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (job_id, user_id, file_name, "queued", created_at, created_at),
+                        (job_id, user_id, device_fingerprint, file_name, "queued", created_at, created_at),
                     )
                 else:
-                    # 匿名用户：记录设备指纹
-                    device_fingerprint = get_device_fingerprint(request)
+                    # 匿名用户：记录设备指纹，user_id为NULL
                     cur.execute(
                         """
                         INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at)
@@ -1290,11 +1291,25 @@ async def job_status(
     with get_db() as conn:
         cur = conn.cursor()
         if current_user:
-            # 认证用户：通过user_id查询
+            # 认证用户：先通过user_id查询
             cur.execute(
                 "SELECT status, error, download_url FROM jobs WHERE id = ? AND user_id = ?",
                 (job_id, current_user["id"]),
             )
+            row = cur.fetchone()
+            # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
+            if not row:
+                device_fingerprint = get_device_fingerprint(request)
+                cur.execute(
+                    "SELECT status, error, download_url, user_id FROM jobs WHERE id = ? AND device_fingerprint = ?",
+                    (job_id, device_fingerprint),
+                )
+                row = cur.fetchone()
+                # 如果通过设备指纹找到，验证user_id是否匹配或为NULL
+                if row:
+                    # SQLite返回的row是字典，可以直接访问
+                    if row.get("user_id") is not None and row.get("user_id") != current_user["id"]:
+                        row = None  # 设备指纹匹配但user_id不匹配，拒绝
         else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
@@ -1302,7 +1317,7 @@ async def job_status(
                 "SELECT status, error, download_url FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
                 (job_id, device_fingerprint),
             )
-        row = cur.fetchone()
+            row = cur.fetchone()
     
     if not row:
         raise HTTPException(status_code=404, detail="job not found")
@@ -1338,8 +1353,30 @@ async def download_exam(
             )
             row = cur.fetchone()
             
-            # 如果没找到，可能是匿名用户创建后注册的job（user_id为NULL）
-            # 或者重建表前的job（user_id可能为0），尝试更宽松的查询
+            # 如果没找到，尝试通过设备指纹验证（可能是IP/User-Agent变化导致user_id查询失败）
+            if not row:
+                device_fingerprint = get_device_fingerprint(request)
+                cur.execute(
+                    "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND device_fingerprint = ?",
+                    (job_id, device_fingerprint),
+                )
+                row = cur.fetchone()
+                # 如果通过设备指纹找到，且user_id匹配或为NULL，允许访问
+                if row:
+                    if row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                        # 设备指纹匹配但user_id不匹配，可能是设备被其他用户使用过
+                        logger.warning(f"Device fingerprint match but user_id mismatch for job {job_id}")
+                        raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+                    # 如果user_id为NULL，可能是匿名用户创建后注册的job，更新user_id
+                    elif row["user_id"] is None:
+                        logger.info(f"Found anonymous job {job_id} for authenticated user {current_user['id']}, updating user_id")
+                        cur.execute(
+                            "UPDATE jobs SET user_id = ? WHERE id = ? AND user_id IS NULL",
+                            (current_user["id"], job_id)
+                        )
+                        conn.commit()
+            
+            # 如果还是没找到，尝试最宽松的查询（仅通过job_id）
             if not row:
                 cur.execute(
                     "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ?",
@@ -1349,6 +1386,18 @@ async def download_exam(
                 # 如果找到但user_id不是当前用户，且不是NULL（匿名用户），则拒绝
                 if row and row["user_id"] is not None and row["user_id"] != current_user["id"]:
                     raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+                # 如果user_id为NULL，尝试通过设备指纹验证
+                elif row and row["user_id"] is None:
+                    device_fingerprint = get_device_fingerprint(request)
+                    if row["device_fingerprint"] != device_fingerprint:
+                        raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
+                    # 设备指纹匹配，更新user_id
+                    logger.info(f"Found anonymous job {job_id} for authenticated user {current_user['id']}, updating user_id")
+                    cur.execute(
+                        "UPDATE jobs SET user_id = ? WHERE id = ? AND user_id IS NULL",
+                        (current_user["id"], job_id)
+                    )
+                    conn.commit()
         else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
