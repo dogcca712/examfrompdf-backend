@@ -1169,11 +1169,18 @@ async def generate_exam(
                         """,
                         (job_id, None, device_fingerprint, file_name, "queued", created_at, created_at),
                     )
-                    # 记录匿名使用（job创建成功后才记录）
-                    ip_address = request.client.host if request.client else "unknown"
-                    user_agent = request.headers.get("user-agent", "unknown")
-                    record_guest_usage(device_fingerprint, ip_address, user_agent)
             logger.info(f"Job {job_id} created in database")
+            
+            # 记录匿名使用（在数据库事务外，避免锁定）
+            if not current_user:
+                device_fingerprint = get_device_fingerprint(request)
+                ip_address = request.client.host if request.client else "unknown"
+                user_agent = request.headers.get("user-agent", "unknown")
+                try:
+                    record_guest_usage(device_fingerprint, ip_address, user_agent)
+                except Exception as e:
+                    # 记录失败不影响主流程，只记录日志
+                    logger.warning(f"Failed to record guest usage: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Failed to create job in database: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job")
