@@ -1049,8 +1049,8 @@ async def generate_exam(
     """
     try:
         # 验证文件类型
-    if lecture_pdf.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+        if lecture_pdf.content_type != "application/pdf":
+            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
         # 判断是认证用户还是匿名用户
         if current_user:
