@@ -18,6 +18,8 @@ import bcrypt
 import stripe
 import logging
 from contextlib import contextmanager
+import queue
+from threading import Semaphore, Lock
 
 # 配置日志
 logging.basicConfig(
@@ -611,7 +613,7 @@ def run_job(job_id: str, lecture_path: Path):
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -738,13 +740,13 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
     """
     try:
         # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    if lecture_pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
         # 用量检查
         check_usage_limit(current_user["id"])
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -819,17 +821,21 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
             logger.warning(f"Failed to update usage count: {e}", exc_info=True)
             # 不影响主流程，继续执行
 
-        # 使用后台线程执行任务，避免阻塞
+        # 将任务加入队列（阶段1改进：使用队列和并发控制）
         try:
-            thread = threading.Thread(target=run_job, args=(job_id, lecture_path))
-            thread.daemon = True
-            thread.start()
-            logger.info(f"Background job thread started for {job_id}")
+            job_queue.put((job_id, lecture_path))
+            update_queue_stats("enqueue")
+            queue_size = queue_stats["current_queue_size"]
+            processing = queue_stats["current_processing"]
+            logger.info(
+                f"Job {job_id} queued. Queue size: {queue_size}, "
+                f"Processing: {processing}/{MAX_CONCURRENT_JOBS}"
+            )
         except Exception as e:
-            logger.error(f"Failed to start background job: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Failed to start processing")
+            logger.error(f"Failed to queue job: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to queue job for processing")
 
-        return JSONResponse({"job_id": job_id})
+    return JSONResponse({"job_id": job_id})
     
     except HTTPException:
         raise
