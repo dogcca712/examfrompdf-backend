@@ -703,47 +703,113 @@ async def health():
     return {"status": "ok"}
 
 
+# 文件大小限制：50MB
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+
 @app.post("/generate")
 async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depends(get_current_user)):
-    if lecture_pdf.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    """
+    生成考试PDF（商用级：添加文件大小检查和错误处理）
+    """
+    try:
+        # 验证文件类型
+        if lecture_pdf.content_type != "application/pdf":
+            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
-    # 用量检查
-    check_usage_limit(current_user["id"])
+        # 用量检查
+        check_usage_limit(current_user["id"])
 
-    job_id = str(uuid.uuid4())
-    file_name = lecture_pdf.filename or "lecture.pdf"
-    created_at = datetime.utcnow().isoformat()
+        job_id = str(uuid.uuid4())
+        file_name = lecture_pdf.filename or "lecture.pdf"
+        created_at = datetime.utcnow().isoformat()
+        
+        logger.info(f"Starting job {job_id} for user {current_user['id']}, file: {file_name}")
+        
+        # 保存到数据库（商用级：移除内存状态，完全依赖数据库）
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO jobs (id, user_id, file_name, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (job_id, current_user["id"], file_name, "queued", created_at, created_at),
+                )
+            logger.info(f"Job {job_id} created in database")
+        except Exception as e:
+            logger.error(f"Failed to create job in database: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to create job")
+        
+        # 使用 BUILD_ROOT 保持一致性
+        job_dir = BUILD_ROOT / job_id
+        try:
+            job_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.error(f"Failed to create job directory: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to create job directory")
+
+        # 保存文件（添加大小检查和错误处理）
+        lecture_path = job_dir / "lecture.pdf"
+        file_size = 0
+        try:
+            with lecture_path.open("wb") as f:
+                # 分块读取，避免内存问题，同时检查大小
+                chunk_size = 8192  # 8KB chunks
+                while True:
+                    chunk = await lecture_pdf.read(chunk_size)
+                    if not chunk:
+                        break
+                    file_size += len(chunk)
+                    if file_size > MAX_FILE_SIZE:
+                        lecture_path.unlink(missing_ok=True)  # 删除部分文件
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024 * 1024):.0f}MB"
+                        )
+                    f.write(chunk)
+            
+            logger.info(f"File saved: {file_name}, size: {file_size / (1024 * 1024):.2f}MB")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to save file: {e}", exc_info=True)
+            # 清理：删除job目录和数据库记录
+            try:
+                import shutil
+                if job_dir.exists():
+                    shutil.rmtree(job_dir)
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            except:
+                pass
+            raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+        # 用量计数 +1
+        try:
+            upsert_usage(current_user["id"])
+        except Exception as e:
+            logger.warning(f"Failed to update usage count: {e}", exc_info=True)
+            # 不影响主流程，继续执行
+
+        # 使用后台线程执行任务，避免阻塞
+        try:
+            thread = threading.Thread(target=run_job, args=(job_id, lecture_path))
+            thread.daemon = True
+            thread.start()
+            logger.info(f"Background job thread started for {job_id}")
+        except Exception as e:
+            logger.error(f"Failed to start background job: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to start processing")
+
+        return JSONResponse({"job_id": job_id})
     
-    # 保存到数据库（商用级：移除内存状态，完全依赖数据库）
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO jobs (id, user_id, file_name, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (job_id, current_user["id"], file_name, "queued", created_at, created_at),
-        )
-    logger.info(f"Job created: {job_id} for user {current_user['id']}, file: {file_name}")
-    
-    # 使用 BUILD_ROOT 保持一致性
-    job_dir = BUILD_ROOT / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-
-    lecture_path = job_dir / "lecture.pdf"
-    with lecture_path.open("wb") as f:
-        shutil.copyfileobj(lecture_pdf.file, f)
-
-    # 用量计数 +1
-    upsert_usage(current_user["id"])
-
-    # 使用后台线程执行任务，避免阻塞
-    thread = threading.Thread(target=run_job, args=(job_id, lecture_path))
-    thread.daemon = True
-    thread.start()
-
-    return JSONResponse({"job_id": job_id})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in generate_exam: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 @app.get("/status/{job_id}")
 async def job_status(job_id: str, current_user=Depends(get_current_user)):
     """
