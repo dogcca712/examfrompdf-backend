@@ -98,68 +98,68 @@ def get_db():
 def init_db():
     with get_db() as conn:
         cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            plan TEXT NOT NULL,
-            stripe_customer_id TEXT,
-            stripe_subscription_id TEXT UNIQUE,
-            status TEXT,
-            current_period_end INTEGER,
-            created_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            count INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(user_id, date),
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS jobs (
-            id TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            file_name TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            download_url TEXT,
-            error TEXT,
-            updated_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS revoked_tokens (
-            jti TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            revoked_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        """
-    )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                plan TEXT NOT NULL,
+                stripe_customer_id TEXT,
+                stripe_subscription_id TEXT UNIQUE,
+                status TEXT,
+                current_period_end INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(user_id, date),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                download_url TEXT,
+                error TEXT,
+                updated_at TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS revoked_tokens (
+                jti TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                revoked_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            """
+        )
         # 创建索引提升查询性能
         cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
