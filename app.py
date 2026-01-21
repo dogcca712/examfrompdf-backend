@@ -232,10 +232,68 @@ def migrate_db():
             except Exception as e:
                 logger.error(f"Failed to add device_fingerprint column: {e}", exc_info=True)
         
-        # 修改 user_id 为可空（SQLite不支持直接修改NOT NULL，但新插入的NULL值会被接受）
-        # 注意：SQLite的ALTER TABLE不支持修改列的NOT NULL约束
-        # 但我们可以通过检查表结构来确认，如果user_id是NOT NULL，我们需要重建表
-        # 为了简化，我们假设旧表的user_id已经是可空的，或者新插入NULL值会被接受
+        # 检查 user_id 列是否允许 NULL（SQLite不支持直接修改NOT NULL约束，需要重建表）
+        cur.execute("PRAGMA table_info(jobs)")
+        columns_info = cur.fetchall()
+        user_id_not_null = False
+        for col in columns_info:
+            if col[1] == "user_id":
+                user_id_not_null = col[3] == 1  # 1 means NOT NULL, 0 means nullable
+                break
+        
+        # 如果 user_id 是 NOT NULL，需要重建表以允许 NULL（用于匿名用户）
+        if user_id_not_null:
+            logger.info("Rebuilding jobs table to allow NULL user_id for anonymous users")
+            try:
+                # 1. 创建新表（允许 user_id 为 NULL）
+                cur.execute("""
+                    CREATE TABLE jobs_new (
+                        id TEXT PRIMARY KEY,
+                        user_id INTEGER,
+                        device_fingerprint TEXT,
+                        file_name TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        download_url TEXT,
+                        error TEXT,
+                        updated_at TEXT,
+                        FOREIGN KEY(user_id) REFERENCES users(id)
+                    )
+                """)
+                
+                # 2. 复制数据（保留所有现有数据）
+                cur.execute("""
+                    INSERT INTO jobs_new 
+                    (id, user_id, device_fingerprint, file_name, status, created_at, download_url, error, updated_at)
+                    SELECT 
+                        id, 
+                        user_id,
+                        device_fingerprint,
+                        file_name, 
+                        status, 
+                        created_at, 
+                        download_url, 
+                        error,
+                        COALESCE(updated_at, created_at)
+                    FROM jobs
+                """)
+                
+                # 3. 删除旧表
+                cur.execute("DROP TABLE jobs")
+                
+                # 4. 重命名新表
+                cur.execute("ALTER TABLE jobs_new RENAME TO jobs")
+                
+                # 5. 重新创建索引
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)")
+                
+                logger.info("Successfully rebuilt jobs table with nullable user_id")
+            except Exception as e:
+                logger.error(f"Failed to rebuild jobs table: {e}", exc_info=True)
+                conn.rollback()
+                raise
         
         conn.commit()
 
