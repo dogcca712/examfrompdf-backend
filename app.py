@@ -41,8 +41,8 @@ PRICE_IDS = {
 
 PLAN_LIMITS = {
     "free": {"daily": 1, "monthly": 30},
-    "starter": {"daily": None, "monthly": 10},
-    "pro": {"daily": None, "monthly": 50},
+    "starter": {"daily": 999999, "monthly": 10},
+    "pro": {"daily": 999999, "monthly": 50},
 }
 
 ALLOWED_ORIGINS = [
@@ -443,10 +443,23 @@ async def usage_status(current_user=Depends(get_current_user)):
     plan = get_plan_for_user(current_user["id"])
     limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
     daily_count, monthly_count = get_usage_counts(current_user["id"])
+    
+    daily_limit = limits.get("daily", 1)
+    monthly_limit = limits.get("monthly", 30)
+    
+    # 计算是否可以生成
+    if plan == "free":
+        can_generate = daily_count < daily_limit
+    else:
+        can_generate = monthly_count < monthly_limit
+    
     return {
         "plan": plan,
-        "daily": {"used": daily_count, "limit": limits.get("daily")},
-        "monthly": {"used": monthly_count, "limit": limits.get("monthly")},
+        "daily_used": daily_count,
+        "daily_limit": daily_limit,
+        "monthly_used": monthly_count,
+        "monthly_limit": monthly_limit,
+        "can_generate": can_generate,
     }
 
 def run_job(job_id: str, lecture_path: Path):
