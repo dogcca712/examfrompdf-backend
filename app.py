@@ -115,6 +115,20 @@ def init_db():
         );
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            file_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            download_url TEXT,
+            error TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -483,6 +497,18 @@ def run_job(job_id: str, lecture_path: Path):
 
     try:
         JOBS[job_id]["status"] = "running"
+        
+        # 更新数据库状态
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE jobs SET status = ? WHERE id = ?
+            """,
+            ("running", job_id),
+        )
+        conn.commit()
+        conn.close()
 
         # 1) 生成 JSON - 直接输出到 job_dir，避免并发冲突
         job_exam_data_json = job_dir / "exam_data.json"
@@ -538,10 +564,35 @@ def run_job(job_id: str, lecture_path: Path):
 
         JOBS[job_id]["status"] = "done"
         JOBS[job_id]["pdf_path"] = str(pdf_path)
+        
+        # 更新数据库
+        conn = get_db()
+        cur = conn.cursor()
+        download_url = f"/download/{job_id}"
+        cur.execute(
+            """
+            UPDATE jobs SET status = ?, download_url = ? WHERE id = ?
+            """,
+            ("done", download_url, job_id),
+        )
+        conn.commit()
+        conn.close()
 
     except Exception as e:
         JOBS[job_id]["status"] = "failed"
         JOBS[job_id]["error"] = str(e)
+        
+        # 更新数据库
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE jobs SET status = ?, error = ? WHERE id = ?
+            """,
+            ("failed", str(e), job_id),
+        )
+        conn.commit()
+        conn.close()
 
 
 @app.get("/", response_class=HTMLResponse)
