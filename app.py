@@ -713,13 +713,13 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
     """
     try:
         # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    if lecture_pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
 
         # 用量检查
         check_usage_limit(current_user["id"])
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -804,7 +804,7 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
             logger.error(f"Failed to start background job: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to start processing")
 
-        return JSONResponse({"job_id": job_id})
+    return JSONResponse({"job_id": job_id})
     
     except HTTPException:
         raise
