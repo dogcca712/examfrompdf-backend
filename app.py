@@ -1213,7 +1213,7 @@ async def job_status(
                 "SELECT status, error, download_url FROM jobs WHERE id = ? AND user_id = ?",
                 (job_id, current_user["id"]),
             )
-    else:
+        else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
             cur.execute(
