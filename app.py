@@ -888,7 +888,7 @@ async def generate_exam(lecture_pdf: UploadFile = File(...), current_user=Depend
         # 用量检查
         check_usage_limit(current_user["id"])
 
-    job_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
