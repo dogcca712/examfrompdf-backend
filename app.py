@@ -810,6 +810,42 @@ async def health():
     return {"status": "ok"}
 
 
+# -------------------- 队列监控 API --------------------
+@app.get("/queue/status")
+async def get_queue_status(current_user=Depends(get_current_user)):
+    """
+    获取任务队列状态（阶段1改进：监控功能）
+    返回：
+    {
+        "queue_size": 5,           # 当前排队数
+        "max_queue_size": 20,       # 历史最高排队数
+        "processing": 3,            # 当前正在处理数
+        "max_processing": 5,        # 历史最高同时处理数
+        "max_concurrent": 5,        # 最大并发数
+        "total_processed": 100,     # 总处理数
+        "total_failed": 2,          # 总失败数
+        "estimated_wait_time": 120  # 预估等待时间（秒）
+    }
+    """
+    with queue_stats_lock:
+        stats = queue_stats.copy()
+    
+    # 计算预估等待时间（假设每个任务平均2分钟）
+    avg_task_time = 120  # 秒
+    estimated_wait = stats["current_queue_size"] * avg_task_time / MAX_CONCURRENT_JOBS
+    
+    return {
+        "queue_size": stats["current_queue_size"],
+        "max_queue_size": stats["max_queue_size"],
+        "processing": stats["current_processing"],
+        "max_processing": stats["max_processing"],
+        "max_concurrent": MAX_CONCURRENT_JOBS,
+        "total_processed": stats["total_processed"],
+        "total_failed": stats["total_failed"],
+        "estimated_wait_time": int(estimated_wait),
+    }
+
+
 # 文件大小限制：50MB
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
