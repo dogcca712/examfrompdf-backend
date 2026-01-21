@@ -1314,19 +1314,32 @@ async def download_exam(
     with get_db() as conn:
         cur = conn.cursor()
         if current_user:
-            # 认证用户：通过user_id查询
+            # 认证用户：先尝试通过user_id查询
             cur.execute(
-                "SELECT status, download_url FROM jobs WHERE id = ? AND user_id = ?",
+                "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND user_id = ?",
                 (job_id, current_user["id"]),
             )
+            row = cur.fetchone()
+            
+            # 如果没找到，可能是匿名用户创建后注册的job（user_id为NULL）
+            # 或者重建表前的job（user_id可能为0），尝试更宽松的查询
+            if not row:
+                cur.execute(
+                    "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ?",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                # 如果找到但user_id不是当前用户，且不是NULL（匿名用户），则拒绝
+                if row and row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                    raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
         else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
             cur.execute(
-                "SELECT status, download_url FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
+                "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
                 (job_id, device_fingerprint),
             )
-        row = cur.fetchone()
+            row = cur.fetchone()
     
     if not row:
         raise HTTPException(status_code=404, detail="job not found")
