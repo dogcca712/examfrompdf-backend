@@ -40,7 +40,7 @@ PRICE_IDS = {
 }
 
 PLAN_LIMITS = {
-    "free": {"daily": 1, "monthly": 30},
+    "free": {"daily": 9999, "monthly": 9999},  # 测试阶段：临时提高限额
     "starter": {"daily": 999999, "monthly": 10},
     "pro": {"daily": 999999, "monthly": 50},
 }
