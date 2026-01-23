@@ -164,31 +164,43 @@ def init_db():
             );
             """
         )
-        # 匿名用户追踪表（用于限制未登录用户）
+        # 匿名用户追踪表（基于 anon_id + 日期）
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS guest_usage (
+            CREATE TABLE IF NOT EXISTS anon_usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                device_fingerprint TEXT NOT NULL,
-                ip_address TEXT,
-                user_agent TEXT,
+                anon_id TEXT NOT NULL,
                 date TEXT NOT NULL,
-                count INTEGER NOT NULL DEFAULT 0,
+                used INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
-                UNIQUE(device_fingerprint, date)
+                UNIQUE(anon_id, date)
             );
             """
         )
         # 匿名用户到注册用户的关联表（用于注册时关联使用记录）
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS guest_to_user (
+            CREATE TABLE IF NOT EXISTS anon_to_user (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                device_fingerprint TEXT NOT NULL,
+                anon_id TEXT NOT NULL,
                 user_id INTEGER NOT NULL,
                 associated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
-                UNIQUE(device_fingerprint, user_id)
+                UNIQUE(anon_id, user_id)
+            );
+            """
+        )
+        # 注册奖励表（记录用户获得的注册奖励次数）
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS registration_bonus (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                bonus_count INTEGER NOT NULL DEFAULT 0,
+                used_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                UNIQUE(user_id)
             );
             """
         )
@@ -196,9 +208,9 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_guest_usage_fingerprint ON guest_usage(device_fingerprint)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_guest_usage_date ON guest_usage(date)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_guest_to_user_fingerprint ON guest_to_user(device_fingerprint)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_anon_usage_anon_id ON anon_usage(anon_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_anon_usage_date ON anon_usage(date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_anon_to_user_anon_id ON anon_to_user(anon_id)")
 
 
 init_db()
@@ -579,8 +591,8 @@ def record_guest_usage(device_fingerprint: str, ip_address: str, user_agent: str
         )
 
 
-def associate_guest_usage_to_user(device_fingerprint: str, user_id: int):
-    """用户注册时，关联匿名使用记录到用户账户"""
+def associate_anon_usage_to_user(anon_id: str, user_id: int) -> Dict[str, Any]:
+    """用户注册时，关联匿名使用记录到用户账户，并给注册奖励"""
     today = date.today().isoformat()
     now = datetime.utcnow().isoformat()
     
@@ -589,55 +601,112 @@ def associate_guest_usage_to_user(device_fingerprint: str, user_id: int):
         # 检查今天是否有匿名使用记录
         cur.execute(
             """
-            SELECT count FROM guest_usage 
-            WHERE device_fingerprint = ? AND date = ?
+            SELECT used FROM anon_usage 
+            WHERE anon_id = ? AND date = ?
             """,
-            (device_fingerprint, today)
+            (anon_id, today)
         )
         row = cur.fetchone()
         
-        if row and row[0] > 0:
-            # 有匿名使用记录，关联到用户并消耗免费额度
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO guest_to_user (device_fingerprint, user_id, associated_at)
-                VALUES (?, ?, ?)
-                """,
-                (device_fingerprint, user_id, now)
-            )
-            # 将匿名使用记录转移到用户使用记录
+        has_used_today = row and row[0] >= 1
+        
+        # 关联匿名使用记录
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO anon_to_user (anon_id, user_id, associated_at)
+            VALUES (?, ?, ?)
+            """,
+            (anon_id, user_id, now)
+        )
+        
+        # 将匿名用户创建的job的user_id更新为当前用户
+        cur.execute(
+            """
+            UPDATE jobs 
+            SET user_id = ? 
+            WHERE device_fingerprint IN (
+                SELECT device_fingerprint FROM jobs 
+                WHERE user_id IS NULL 
+                LIMIT 100
+            ) AND user_id IS NULL
+            """,
+            (user_id,)
+        )
+        updated_jobs = cur.rowcount
+        
+        # 如果今天已使用，记录到用户使用记录（但不给额外额度）
+        if has_used_today:
             cur.execute(
                 """
                 INSERT INTO usage (user_id, date, count)
-                VALUES (?, ?, ?)
+                VALUES (?, ?, 1)
                 ON CONFLICT(user_id, date) DO UPDATE SET
-                    count = count + ?
+                    count = count + 1
                 """,
-                (user_id, today, row[0], row[0])
+                (user_id, today)
             )
-            
-            # 重要：将匿名用户创建的job的user_id更新为当前用户
-            # 这样注册后就能在历史记录中看到这些job
-            cur.execute(
-                """
-                UPDATE jobs 
-                SET user_id = ? 
-                WHERE device_fingerprint = ? AND user_id IS NULL
-                """,
-                (user_id, device_fingerprint)
-            )
-            updated_jobs = cur.rowcount
-            if updated_jobs > 0:
-                logger.info(f"Updated {updated_jobs} anonymous job(s) to user {user_id}")
-            
-            logger.info(f"Associated guest usage ({row[0]} times) to user {user_id}")
-            return row[0]
-    return 0
+        
+        # 给注册奖励：3次额外试卷（不限当天）
+        bonus_count = 3
+        cur.execute(
+            """
+            INSERT INTO registration_bonus (user_id, bonus_count, used_count, created_at)
+            VALUES (?, ?, 0, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                bonus_count = bonus_count + ?
+            """,
+            (user_id, bonus_count, now, bonus_count)
+        )
+        
+        logger.info(f"Associated anon_id {anon_id[:8]}... to user {user_id}, updated {updated_jobs} jobs, gave {bonus_count} bonus")
+        
+        return {
+            "has_used_today": has_used_today,
+            "updated_jobs": updated_jobs,
+            "bonus_count": bonus_count
+        }
+    
+    return {"has_used_today": False, "updated_jobs": 0, "bonus_count": 0}
+
+
+def get_registration_bonus_remaining(user_id: int) -> int:
+    """获取用户剩余的注册奖励次数"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT bonus_count, used_count FROM registration_bonus 
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        )
+        row = cur.fetchone()
+        if row:
+            return max(0, row[0] - row[1])
+        return 0
+
+
+def use_registration_bonus(user_id: int) -> bool:
+    """使用一次注册奖励"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE registration_bonus 
+            SET used_count = used_count + 1
+            WHERE user_id = ? AND used_count < bonus_count
+            """,
+            (user_id,)
+        )
+        return cur.rowcount > 0
 
 
 # -------------------- 认证 API --------------------
 @app.post("/auth/register")
 async def register(request: Request, payload: Dict[str, str]):
+    from fastapi import Response
+    response = Response()
+    
     email = (payload.get("email") or "").strip().lower()
     password = payload.get("password") or ""
     if not email or not password:
@@ -657,23 +726,49 @@ async def register(request: Request, payload: Dict[str, str]):
         user_id = cur.lastrowid
     
     # 关联匿名使用记录（如果存在）
-    device_fingerprint = get_device_fingerprint(request)
-    guest_usage_count = associate_guest_usage_to_user(device_fingerprint, user_id)
-    if guest_usage_count > 0:
-        logger.info(f"Associated {guest_usage_count} guest usage(s) to new user {user_id}")
+    anon_id = request.cookies.get("anon_id")
+    if anon_id:
+        association_result = associate_anon_usage_to_user(anon_id, user_id)
+        logger.info(f"Associated anon_id {anon_id[:8]}... to new user {user_id}, bonus: {association_result['bonus_count']}")
+    else:
+        # 如果没有 anon_id，仍然给注册奖励
+        now = datetime.utcnow().isoformat()
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO registration_bonus (user_id, bonus_count, used_count, created_at)
+                VALUES (?, 3, 0, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    bonus_count = bonus_count + 3
+                """,
+                (user_id, now)
+            )
+        logger.info(f"Gave registration bonus to new user {user_id} (no anon_id)")
     
     logger.info(f"User registered: {email} (id: {user_id})")
 
     token = generate_jwt(user_id, email)
     plan = get_plan_for_user(user_id)
-    return {
+    
+    result = {
         "access_token": token,
         "user": {
             "id": user_id,
             "email": email,
             "plan": plan
-        }
+        },
+        "bonus_count": 3  # 注册奖励次数
     }
+    
+    # 返回包含Cookie的响应
+    from fastapi.responses import JSONResponse
+    json_response = JSONResponse(content=result)
+    # 复制Cookie设置（如果有）
+    for header, value in response.headers.items():
+        if header.lower() == "set-cookie":
+            json_response.headers.append(header, value)
+    return json_response
 
 
 @app.post("/auth/login")
@@ -847,13 +942,16 @@ async def usage_status(current_user=Depends(get_current_user)):
     else:
         can_generate = monthly_count < monthly_limit
     
+    bonus_remaining = get_registration_bonus_remaining(current_user["id"])
+    
     return {
         "plan": plan,
         "daily_used": daily_count,
         "daily_limit": daily_limit,
         "monthly_used": monthly_count,
         "monthly_limit": monthly_limit,
-        "can_generate": can_generate,
+        "can_generate": can_generate or bonus_remaining > 0,  # 包括注册奖励
+        "bonus_remaining": bonus_remaining,  # 注册奖励剩余次数
     }
 
 
@@ -1129,33 +1227,37 @@ async def generate_exam(
 
         # 判断是认证用户还是匿名用户
         if current_user:
-            # 认证用户：检查用量限制
-            check_usage_limit(current_user["id"])
+            # 认证用户：检查用量限制（包括注册奖励）
             user_id = current_user["id"]
             user_type = "authenticated"
+            
+            # 检查是否有注册奖励可用
+            bonus_remaining = get_registration_bonus_remaining(user_id)
+            if bonus_remaining > 0:
+                # 使用注册奖励
+                use_registration_bonus(user_id)
+                logger.info(f"Authenticated user {user_id} using registration bonus (remaining: {bonus_remaining - 1})")
+            else:
+                # 检查正常用量限制
+                check_usage_limit(user_id)
+            
             logger.info(f"Authenticated user {user_id} requesting job")
         else:
-            # 匿名用户：检查设备指纹限制
-            device_fingerprint = get_device_fingerprint(request)
-            ip_address = request.client.host if request.client else "unknown"
-            user_agent = request.headers.get("user-agent", "unknown")
+            # 匿名用户：获取或创建 anon_id（从Cookie）
+            from fastapi import Response
+            response = Response()
+            anon_id = get_or_create_anon_id(request, response)
             
-            if not check_guest_usage_limit(device_fingerprint):
+            # 检查匿名用户是否超过限制
+            if not check_anon_usage_limit(anon_id):
                 raise HTTPException(
                     status_code=429, 
-                    detail="Anonymous users can only generate one exam per day. Please register for more."
+                    detail="You've used your free daily limit. Register to unlock more features (difficulty adjustment, multiple PDFs, more exams)."
                 )
             
-            # 使用特殊用户ID 0 表示匿名用户（或创建临时用户记录）
-            # 但为了数据库完整性，我们使用一个特殊的guest用户ID
-            # 或者直接在jobs表中使用NULL，但需要修改表结构
-            # 暂时使用0作为guest user_id，但需要确保数据库允许
-            user_id = 0  # 匿名用户
-            user_type = "guest"
-            logger.info(f"Guest user (fingerprint: {device_fingerprint[:8]}...) requesting job")
-            
-            # 记录匿名使用（在创建job之前，如果失败不会记录）
-            # 注意：这里先不记录，等job创建成功后再记录
+            user_id = None  # 匿名用户
+            user_type = "anonymous"
+            logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
         job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
@@ -1191,14 +1293,11 @@ async def generate_exam(
             
             # 记录匿名使用（在数据库事务外，避免锁定）
             if not current_user:
-                device_fingerprint = get_device_fingerprint(request)
-                ip_address = request.client.host if request.client else "unknown"
-                user_agent = request.headers.get("user-agent", "unknown")
                 try:
-                    record_guest_usage(device_fingerprint, ip_address, user_agent)
+                    record_anon_usage(anon_id)
                 except Exception as e:
                     # 记录失败不影响主流程，只记录日志
-                    logger.warning(f"Failed to record guest usage: {e}", exc_info=True)
+                    logger.warning(f"Failed to record anon usage: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Failed to create job in database: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job")
@@ -1271,7 +1370,17 @@ async def generate_exam(
             logger.error(f"Failed to queue job: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to queue job for processing")
 
-        return JSONResponse({"job_id": job_id})
+        # 如果是匿名用户，需要返回包含Cookie的响应
+        if not current_user:
+            from fastapi.responses import JSONResponse
+            json_response = JSONResponse(content={"job_id": job_id, "status": "queued", "message": "Job queued successfully"})
+            # 复制Cookie设置
+            for header, value in response.headers.items():
+                if header.lower() == "set-cookie":
+                    json_response.headers.append(header, value)
+            return json_response
+        
+        return {"job_id": job_id, "status": "queued", "message": "Job queued successfully"}
     
     except HTTPException:
         raise
