@@ -123,8 +123,18 @@ Lecture material:
 
 
 
-def generate_exam_json(lecture_text: str) -> dict:
-    prompt = build_prompt(lecture_text)
+def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium") -> dict:
+    """
+    生成exam JSON数据
+    
+    参数：
+    - lecture_text: PDF提取的文本
+    - mcq_count: 选择题数量
+    - short_answer_count: 简答题数量
+    - long_question_count: 论述题数量
+    - difficulty: 难度等级
+    """
+    prompt = build_prompt(lecture_text, mcq_count, short_answer_count, long_question_count, difficulty)
 
     response = client.chat.completions.create(
         model="gpt-4.1-mini",  # 或你想用的其它模型
@@ -323,16 +333,23 @@ if __name__ == "__main__":
     
     output_path = Path(output_path)
     
+    # 从环境变量读取exam配置
+    mcq_count = int(os.environ.get("EXAMGEN_MCQ_COUNT", "10"))
+    short_answer_count = int(os.environ.get("EXAMGEN_SHORT_ANSWER_COUNT", "3"))
+    long_question_count = int(os.environ.get("EXAMGEN_LONG_QUESTION_COUNT", "1"))
+    difficulty = os.environ.get("EXAMGEN_DIFFICULTY", "medium")
+    
     text = extract_text_from_pdf(pdf_path)
 
     print(f"Extracted text length: {len(text)}")
     print(f"PDF path: {pdf_path}")
     print(f"Output JSON path: {output_path}")
+    print(f"Exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
 
-    exam_data, raw = generate_exam_json(text)
+    exam_data, raw = generate_exam_json(text, mcq_count, short_answer_count, long_question_count, difficulty)
 
     for attempt in range(3):  # 最多 3 次（第一次生成 + 2 次修复）
-        errors = validate_exam_data(exam_data, strict_counts=True)  # 先放宽，稳定后再改 True
+        errors = validate_exam_data(exam_data, strict_counts=True, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
         if not errors:
             break
 

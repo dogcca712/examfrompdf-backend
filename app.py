@@ -1086,11 +1086,22 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
     
     return {"jobs": jobs, "total": total}
 
-def run_job(job_id: str, lecture_path: Path):
+def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any]] = None):
     """
     后台执行：PDF -> exam_data.json -> render_exam.py -> pdflatex -> PDF
     结果写入数据库（商用级改进：移除内存状态）
+    
+    exam_config: 包含 mcq_count, short_answer_count, long_question_count, difficulty
     """
+    # 设置默认值
+    if exam_config is None:
+        exam_config = {
+            "mcq_count": 10,
+            "short_answer_count": 3,
+            "long_question_count": 1,
+            "difficulty": "medium"
+        }
+    
     job_dir = BUILD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1119,11 +1130,17 @@ def run_job(job_id: str, lecture_path: Path):
 
         # 1) 生成 JSON - 直接输出到 job_dir，避免并发冲突
         job_exam_data_json = job_dir / "exam_data.json"
+        env = os.environ.copy()
+        # 传递exam配置参数到generate_exam_data.py
+        env["EXAMGEN_MCQ_COUNT"] = str(exam_config["mcq_count"])
+        env["EXAMGEN_SHORT_ANSWER_COUNT"] = str(exam_config["short_answer_count"])
+        env["EXAMGEN_LONG_QUESTION_COUNT"] = str(exam_config["long_question_count"])
+        env["EXAMGEN_DIFFICULTY"] = exam_config["difficulty"]
         subprocess.run(
             [sys.executable, str(BASE_DIR / "generate_exam_data.py"), str(job_lecture), str(job_exam_data_json)],
             cwd=str(BASE_DIR),
             check=True,
-            env=os.environ.copy(),
+            env=env,
         )
 
         # 将 templates 拷一份（避免你以后改模板影响旧 job）
@@ -1350,19 +1367,19 @@ async def generate_exam(
                     # 认证用户：同时保存user_id和设备指纹
                     cur.execute(
                         """
-                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at, mcq_count, short_answer_count, long_question_count, difficulty)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (job_id, user_id, device_fingerprint, file_name, "queued", created_at, created_at),
+                        (job_id, user_id, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty),
                     )
                 else:
                     # 匿名用户：记录设备指纹，user_id为NULL
                     cur.execute(
                         """
-                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at, mcq_count, short_answer_count, long_question_count, difficulty)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (job_id, None, device_fingerprint, file_name, "queued", created_at, created_at),
+                        (job_id, None, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty),
                     )
             logger.info(f"Job {job_id} created in database")
             
