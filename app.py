@@ -1341,8 +1341,17 @@ async def generate_exam(
     生成考试PDF（支持匿名用户和认证用户）
     - 认证用户：检查用量限制
     - 匿名用户：每天只能使用1次（通过设备指纹识别）
+    
+    参数：
+    - mcq_count: 选择题数量（默认10）
+    - short_answer_count: 简答题数量（默认3）
+    - long_question_count: 论述题数量（默认1）
+    - difficulty: 难度等级（easy/medium/hard，默认medium）
     """
     try:
+        # 记录接收到的参数（用于调试）
+        logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
+        
         # 验证文件类型
         if lecture_pdf.content_type != "application/pdf":
             raise HTTPException(status_code=400, detail="Please upload a PDF file.")
