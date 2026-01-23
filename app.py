@@ -1139,7 +1139,7 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -1208,14 +1208,32 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
             # 使用pdflatex（更快，兼容性更好）
             compiler = "pdflatex"
         
-        subprocess.run(
+        # 编译 LaTeX（允许警告，只要PDF生成成功即可）
+        result = subprocess.run(
             [compiler, "-interaction=nonstopmode", "-output-directory", str(job_dir / "build"), str(tex_path)],
-            check=True,
+            capture_output=True,
+            text=True,
         )
 
         pdf_path = job_dir / "build" / "exam_filled.pdf"
+        
+        # 检查PDF是否成功生成（这是最重要的）
         if not pdf_path.exists():
-            raise RuntimeError("PDF was not generated.")
+            # PDF未生成，记录错误输出
+            logger.error(f"LaTeX compilation failed. Exit code: {result.returncode}")
+            logger.error(f"LaTeX stderr: {result.stderr[-1000:]}")  # 只记录最后1000字符
+            raise RuntimeError(f"PDF was not generated. LaTeX exit code: {result.returncode}")
+        
+        # PDF已生成，即使有警告也视为成功
+        if result.returncode != 0:
+            # 有警告但PDF生成了，记录警告但不失败
+            logger.warning(f"LaTeX compilation completed with warnings (exit code: {result.returncode}), but PDF was generated successfully")
+            # 可选：记录警告信息（但不要太多）
+            if result.stderr:
+                # 只记录关键警告，避免日志过多
+                warnings = [line for line in result.stderr.split('\n') if 'Warning' in line or 'Error' in line]
+                if warnings:
+                    logger.warning(f"LaTeX warnings: {warnings[:5]}")  # 只记录前5个警告
 
         # 更新数据库（商用级：移除内存状态）
         download_url = f"/download/{job_id}"
@@ -1357,8 +1375,8 @@ async def generate_exam(
         logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
         
         # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    if lecture_pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
         
         # 验证参数
         if mcq_count < 0 or mcq_count > 50:
@@ -1407,7 +1425,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -1453,16 +1471,16 @@ async def generate_exam(
         # 使用 BUILD_ROOT 保持一致性
         job_dir = BUILD_ROOT / job_id
         try:
-            job_dir.mkdir(parents=True, exist_ok=True)
+    job_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.error(f"Failed to create job directory: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job directory")
 
         # 保存文件（添加大小检查和错误处理）
-        lecture_path = job_dir / "lecture.pdf"
+    lecture_path = job_dir / "lecture.pdf"
         file_size = 0
         try:
-            with lecture_path.open("wb") as f:
+    with lecture_path.open("wb") as f:
                 # 分块读取，避免内存问题，同时检查大小
                 # 使用 read() 方法（同步，但在异步上下文中可以接受）
                 chunk_size = 8192  # 8KB chunks
@@ -1574,7 +1592,7 @@ async def job_status(
                     # SQLite返回的row是字典，可以直接访问
                     if row.get("user_id") is not None and row.get("user_id") != current_user["id"]:
                         row = None  # 设备指纹匹配但user_id不匹配，拒绝
-        else:
+    else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
             cur.execute(
