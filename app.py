@@ -543,13 +543,74 @@ def get_current_user_optional(credentials: Optional[HTTPAuthorizationCredentials
 
 
 def get_device_fingerprint(request: Request) -> str:
-    """生成设备指纹：IP + User-Agent"""
+    """生成设备指纹：IP + User-Agent（用于备用验证）"""
     ip = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "unknown")
     # 使用hash确保隐私，同时保持一致性
     fingerprint_str = f"{ip}:{user_agent}"
     fingerprint = hashlib.sha256(fingerprint_str.encode()).hexdigest()[:32]  # 32字符足够
     return fingerprint
+
+
+def get_or_create_anon_id(request: Request, response: Response) -> str:
+    """获取或创建匿名用户ID（从Cookie读取或生成新的）"""
+    from fastapi.responses import Response as FastAPIResponse
+    # 从Cookie读取 anon_id
+    anon_id = request.cookies.get("anon_id")
+    
+    if not anon_id:
+        # 生成新的 anon_id
+        anon_id = str(uuid.uuid4())
+        # 设置Cookie（强制性，不需要用户同意）
+        if isinstance(response, FastAPIResponse):
+            response.set_cookie(
+                key="anon_id",
+                value=anon_id,
+                httponly=True,  # 防止XSS攻击
+                samesite="lax",  # 防止CSRF攻击
+                max_age=31536000,  # 1年过期
+                secure=False  # 如果使用HTTPS，可以设置为True
+            )
+        logger.info(f"Generated new anon_id: {anon_id[:8]}...")
+    
+    return anon_id
+
+
+def check_anon_usage_limit(anon_id: str) -> bool:
+    """检查匿名用户是否超过限制（每天只能使用1次）"""
+    today = date.today().isoformat()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT used FROM anon_usage 
+            WHERE anon_id = ? AND date = ?
+            """,
+            (anon_id, today)
+        )
+        row = cur.fetchone()
+        if row:
+            used = row[0]
+            if used >= 1:  # 匿名用户每天只能使用1次
+                return False
+        return True
+
+
+def record_anon_usage(anon_id: str):
+    """记录匿名用户使用"""
+    today = date.today().isoformat()
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO anon_usage (anon_id, date, used, created_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(anon_id, date) DO UPDATE SET
+                used = 1
+            """,
+            (anon_id, today, now)
+        )
 
 
 def check_guest_usage_limit(device_fingerprint: str) -> bool:
