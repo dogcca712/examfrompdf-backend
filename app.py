@@ -1371,12 +1371,9 @@ async def generate_exam(
         # 记录接收到的参数（用于调试）
         logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
         
-        # 记录接收到的参数（用于调试）
-        logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
-        
         # 验证文件类型
-    if lecture_pdf.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+        if lecture_pdf.content_type != "application/pdf":
+            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
         
         # 验证参数
         if mcq_count < 0 or mcq_count > 50:
