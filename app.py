@@ -1589,7 +1589,7 @@ async def job_status(
                     # SQLite返回的row是字典，可以直接访问
                     if row.get("user_id") is not None and row.get("user_id") != current_user["id"]:
                         row = None  # 设备指纹匹配但user_id不匹配，拒绝
-    else:
+        else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
             cur.execute(
