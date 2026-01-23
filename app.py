@@ -1166,6 +1166,7 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
         env["EXAMGEN_SHORT_ANSWER_COUNT"] = str(exam_config["short_answer_count"])
         env["EXAMGEN_LONG_QUESTION_COUNT"] = str(exam_config["long_question_count"])
         env["EXAMGEN_DIFFICULTY"] = exam_config["difficulty"]
+        logger.info(f"Passing exam config to generate_exam_data.py: MCQ={exam_config['mcq_count']}, SAQ={exam_config['short_answer_count']}, LQ={exam_config['long_question_count']}, Difficulty={exam_config['difficulty']}")
         subprocess.run(
             [sys.executable, str(BASE_DIR / "generate_exam_data.py"), str(job_lecture), str(job_exam_data_json)],
             cwd=str(BASE_DIR),
@@ -1352,9 +1353,25 @@ async def generate_exam(
         # 记录接收到的参数（用于调试）
         logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
         
+        # 记录接收到的参数（用于调试）
+        logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
+        
         # 验证文件类型
         if lecture_pdf.content_type != "application/pdf":
             raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+        
+        # 验证参数
+        if mcq_count < 0 or mcq_count > 50:
+            raise HTTPException(status_code=400, detail="mcq_count must be between 0 and 50")
+        if short_answer_count < 0 or short_answer_count > 20:
+            raise HTTPException(status_code=400, detail="short_answer_count must be between 0 and 20")
+        if long_question_count < 0 or long_question_count > 10:
+            raise HTTPException(status_code=400, detail="long_question_count must be between 0 and 10")
+        # 支持 "normal" 映射到 "medium"（前端兼容）
+        if difficulty == "normal":
+            difficulty = "medium"
+        if difficulty not in ["easy", "medium", "hard"]:
+            raise HTTPException(status_code=400, detail="difficulty must be one of: easy, medium, hard")
 
         # 判断是认证用户还是匿名用户
         if current_user:
