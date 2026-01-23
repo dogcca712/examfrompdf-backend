@@ -248,6 +248,28 @@ def migrate_db():
             except Exception as e:
                 logger.error(f"Failed to add device_fingerprint column: {e}", exc_info=True)
         
+        # 重新获取列列表（因为可能已经添加了新列）
+        cur.execute("PRAGMA table_info(jobs)")
+        columns = [row[1] for row in cur.fetchall()]
+        
+        # 添加exam配置列（如果不存在）
+        for col_name, col_type, default in [
+            ("mcq_count", "INTEGER", 10),
+            ("short_answer_count", "INTEGER", 3),
+            ("long_question_count", "INTEGER", 1),
+            ("difficulty", "TEXT", "medium")
+        ]:
+            if col_name not in columns:
+                logger.info(f"Adding {col_name} column to jobs table")
+                try:
+                    if col_type == "INTEGER":
+                        cur.execute(f"ALTER TABLE jobs ADD COLUMN {col_name} INTEGER DEFAULT {default}")
+                    else:
+                        cur.execute(f"ALTER TABLE jobs ADD COLUMN {col_name} TEXT DEFAULT '{default}'")
+                    logger.info(f"Successfully added {col_name} column")
+                except Exception as e:
+                    logger.error(f"Failed to add {col_name} column: {e}", exc_info=True)
+        
         # 检查 user_id 列是否允许 NULL（SQLite不支持直接修改NOT NULL约束，需要重建表）
         cur.execute("PRAGMA table_info(jobs)")
         columns_info = cur.fetchall()
