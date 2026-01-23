@@ -552,9 +552,8 @@ def get_device_fingerprint(request: Request) -> str:
     return fingerprint
 
 
-def get_or_create_anon_id(request: Request, response: Response) -> str:
+def get_or_create_anon_id(request: Request, response) -> str:
     """获取或创建匿名用户ID（从Cookie读取或生成新的）"""
-    from fastapi.responses import Response as FastAPIResponse
     # 从Cookie读取 anon_id
     anon_id = request.cookies.get("anon_id")
     
@@ -562,7 +561,8 @@ def get_or_create_anon_id(request: Request, response: Response) -> str:
         # 生成新的 anon_id
         anon_id = str(uuid.uuid4())
         # 设置Cookie（强制性，不需要用户同意）
-        if isinstance(response, FastAPIResponse):
+        # response 应该是 FastAPI 的 Response 对象
+        if hasattr(response, 'set_cookie'):
             response.set_cookie(
                 key="anon_id",
                 value=anon_id,
