@@ -283,7 +283,7 @@ def migrate_db():
         if user_id_not_null:
             logger.info("Rebuilding jobs table to allow NULL user_id for anonymous users")
             try:
-                # 1. 创建新表（允许 user_id 为 NULL）
+                # 1. 创建新表（允许 user_id 为 NULL，包含exam配置列）
                 cur.execute("""
                     CREATE TABLE jobs_new (
                         id TEXT PRIMARY KEY,
@@ -295,14 +295,18 @@ def migrate_db():
                         download_url TEXT,
                         error TEXT,
                         updated_at TEXT,
+                        mcq_count INTEGER DEFAULT 10,
+                        short_answer_count INTEGER DEFAULT 3,
+                        long_question_count INTEGER DEFAULT 1,
+                        difficulty TEXT DEFAULT 'medium',
                         FOREIGN KEY(user_id) REFERENCES users(id)
                     )
                 """)
                 
-                # 2. 复制数据（保留所有现有数据）
+                # 2. 复制数据（保留所有现有数据，新列使用默认值）
                 cur.execute("""
                     INSERT INTO jobs_new 
-                    (id, user_id, device_fingerprint, file_name, status, created_at, download_url, error, updated_at)
+                    (id, user_id, device_fingerprint, file_name, status, created_at, download_url, error, updated_at, mcq_count, short_answer_count, long_question_count, difficulty)
                     SELECT 
                         id, 
                         user_id,
@@ -312,7 +316,11 @@ def migrate_db():
                         created_at, 
                         download_url, 
                         error,
-                        COALESCE(updated_at, created_at)
+                        COALESCE(updated_at, created_at),
+                        COALESCE(mcq_count, 10),
+                        COALESCE(short_answer_count, 3),
+                        COALESCE(long_question_count, 1),
+                        COALESCE(difficulty, 'medium')
                     FROM jobs
                 """)
                 
