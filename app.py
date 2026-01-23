@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -150,6 +150,10 @@ def init_db():
                 download_url TEXT,
                 error TEXT,
                 updated_at TEXT,
+                mcq_count INTEGER DEFAULT 10,  -- 选择题数量
+                short_answer_count INTEGER DEFAULT 3,  -- 简答题数量
+                long_question_count INTEGER DEFAULT 1,  -- 论述题数量
+                difficulty TEXT DEFAULT 'medium',  -- 难度等级: easy, medium, hard
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
             """
@@ -365,7 +369,13 @@ def worker_thread():
     while True:
         try:
             # 从队列中获取任务（阻塞等待）
-            job_id, lecture_path = job_queue.get()
+            item = job_queue.get()
+            # 兼容新旧格式
+            if len(item) == 3:
+                job_id, lecture_path, exam_config = item
+            else:
+                job_id, lecture_path = item[:2]
+                exam_config = None
             
             # 获取信号量（如果已达到最大并发数，会阻塞等待）
             job_semaphore.acquire()
@@ -374,7 +384,7 @@ def worker_thread():
             
             try:
                 logger.info(f"Worker thread: Starting job {job_id}")
-                run_job(job_id, lecture_path)
+                run_job(job_id, lecture_path, exam_config)
                 update_queue_stats("finish_processing")
                 logger.info(f"Worker thread: Completed job {job_id}")
             except Exception as e:
@@ -1273,7 +1283,11 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 @app.post("/generate")
 async def generate_exam(
     request: Request,
-    lecture_pdf: UploadFile = File(...), 
+    lecture_pdf: UploadFile = File(...),
+    mcq_count: int = Form(10),
+    short_answer_count: int = Form(3),
+    long_question_count: int = Form(1),
+    difficulty: str = Form("medium"),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """
@@ -1418,8 +1432,15 @@ async def generate_exam(
                 # 不影响主流程，继续执行
 
         # 将任务加入队列（阶段1改进：使用队列和并发控制）
+        # 传递exam配置参数
+        exam_config = {
+            "mcq_count": mcq_count,
+            "short_answer_count": short_answer_count,
+            "long_question_count": long_question_count,
+            "difficulty": difficulty
+        }
         try:
-            job_queue.put((job_id, lecture_path))
+            job_queue.put((job_id, lecture_path, exam_config))
             update_queue_stats("enqueue")
             queue_size = queue_stats["current_queue_size"]
             processing = queue_stats["current_processing"]

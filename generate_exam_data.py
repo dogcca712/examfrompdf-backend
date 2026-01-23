@@ -29,11 +29,25 @@ def extract_text_from_pdf(path: str, max_pages: int = 10) -> str:
     return result
 
 
-def build_prompt(lecture_text: str) -> str:
+def build_prompt(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium") -> str:
     """
     构造发给 LLM 的 user prompt，要求它输出 exam_data.json 所需的结构。
-    这版加入了“禁止出元信息题”的约束。
+    这版加入了"禁止出元信息题"的约束，并支持自定义题目数量和难度。
+    
+    参数：
+    - mcq_count: 选择题数量
+    - short_answer_count: 简答题数量
+    - long_question_count: 论述题数量
+    - difficulty: 难度等级 (easy/medium/hard)
     """
+    # 难度描述
+    difficulty_descriptions = {
+        "easy": "Easy: Focus on basic concepts, definitions, and straightforward applications. Questions should test fundamental understanding that most students can answer with basic knowledge.",
+        "medium": "Medium: Include a mix of basic and intermediate concepts. Questions should require some analysis, application, or synthesis of concepts. Suitable for average students.",
+        "hard": "Hard: Emphasize advanced concepts, complex problem-solving, multi-step reasoning, and deep understanding. Questions should challenge even strong students and require critical thinking."
+    }
+    difficulty_instruction = difficulty_descriptions.get(difficulty, difficulty_descriptions["medium"])
+    
     return f"""
 You are an assistant that creates practice exam papers for university students.
 
@@ -82,14 +96,18 @@ Important global rules:
 - Never ask about trivia or superficial facts that do not help assess understanding of the core technical ideas.
 - Avoid “copying entire sentences” from the slides; instead, transform them into questions that require the student to apply or explain the ideas in their own words.
 
+Difficulty Level:
+{difficulty_instruction}
+
 Question-specific requirements:
-- "mcq" should contain BETWEEN 2 AND 10 questions for now (we will later enforce exactly 10).
+- "mcq" must contain EXACTLY {mcq_count} multiple-choice questions.
 - Each MCQ must:
   - focus on a genuine concept or skill from the lecture (e.g. number systems, data representation, machine instructions, operating systems, file system, etc., depending on the lecture content),
   - have exactly 4 options,
-  - have only **one clearly correct** option; the other options must be plausible distractors.
-- "saq" should contain 3 short-answer questions that require the student to write a few sentences or show small calculations/derivations.
-- "lq" should contain exactly 1 long question that requires extended reasoning, explanation, or a multi-step solution.
+  - have only **one clearly correct** option; the other options must be plausible distractors,
+  - match the difficulty level specified above.
+- "saq" must contain EXACTLY {short_answer_count} short-answer questions that require the student to write a few sentences or show small calculations/derivations. Match the difficulty level.
+- "lq" must contain EXACTLY {long_question_count} long question(s) that require extended reasoning, explanation, or a multi-step solution. Match the difficulty level.
 
 JSON formatting rules:
 - The JSON must be valid and strictly follow the structure above.
@@ -133,10 +151,10 @@ def generate_exam_json(lecture_text: str) -> dict:
 
     return json.loads(raw), raw
 
-def validate_exam_data(exam_data: dict, *, strict_counts: bool = True) -> list[str]:
+def validate_exam_data(exam_data: dict, *, strict_counts: bool = True, expected_mcq: int = 10, expected_saq: int = 3, expected_lq: int = 1) -> list[str]:
     """
     返回错误列表。空列表 = 通过。
-    strict_counts=True 表示强制 10/3/1。
+    strict_counts=True 表示强制检查期望数量。
     """
     errors = []
 
@@ -171,20 +189,20 @@ def validate_exam_data(exam_data: dict, *, strict_counts: bool = True) -> list[s
 
     # ---- count constraints ----
     if strict_counts:
-        if len(mcq) != 10:
-            errors.append(f"MCQ count must be 10 (got {len(mcq)})")
-        if len(saq) != 3:
-            errors.append(f"SAQ count must be 3 (got {len(saq)})")
-        if len(lq) != 1:
-            errors.append(f"LQ count must be 1 (got {len(lq)})")
+        if len(mcq) != expected_mcq:
+            errors.append(f"MCQ count must be {expected_mcq} (got {len(mcq)})")
+        if len(saq) != expected_saq:
+            errors.append(f"SAQ count must be {expected_saq} (got {len(saq)})")
+        if len(lq) != expected_lq:
+            errors.append(f"LQ count must be {expected_lq} (got {len(lq)})")
     else:
         # 允许你测试阶段先放宽
-        if not (2 <= len(mcq) <= 10):
-            errors.append(f"MCQ count must be between 2 and 10 (got {len(mcq)})")
-        if len(saq) != 3:
-            errors.append(f"SAQ count must be 3 (got {len(saq)})")
-        if len(lq) != 1:
-            errors.append(f"LQ count must be 1 (got {len(lq)})")
+        if not (0 <= len(mcq) <= 50):
+            errors.append(f"MCQ count must be between 0 and 50 (got {len(mcq)})")
+        if not (0 <= len(saq) <= 20):
+            errors.append(f"SAQ count must be between 0 and 20 (got {len(saq)})")
+        if not (0 <= len(lq) <= 10):
+            errors.append(f"LQ count must be between 0 and 10 (got {len(lq)})")
 
     # ---- per-question validation ----
     def is_int(x): return isinstance(x, int) and not isinstance(x, bool)
