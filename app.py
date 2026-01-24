@@ -1426,7 +1426,7 @@ async def generate_exam(
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
-        logger.info(f"Starting job {job_id} for {user_type} user {user_id}, file: {file_name}")
+        logger.info(f"[GENERATE] Starting job {job_id} for {user_type} user {user_id}, file: {file_name}")
         
         # 保存到数据库（商用级：移除内存状态，完全依赖数据库）
         try:
@@ -1434,6 +1434,7 @@ async def generate_exam(
                 cur = conn.cursor()
                 # 无论认证用户还是匿名用户，都保存设备指纹，用于备用验证
                 device_fingerprint = get_device_fingerprint(request)
+                logger.info(f"[GENERATE] Device fingerprint for job {job_id}: {device_fingerprint[:16]}...")
                 if current_user:
                     # 认证用户：同时保存user_id和设备指纹
                     cur.execute(
