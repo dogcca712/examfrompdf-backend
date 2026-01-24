@@ -1443,6 +1443,7 @@ async def generate_exam(
                         """,
                         (job_id, user_id, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty),
                     )
+                    logger.info(f"[GENERATE] Job {job_id} saved to DB: user_id={user_id}, device_fp={device_fingerprint[:16]}...")
                 else:
                     # 匿名用户：记录设备指纹，user_id为NULL
                     cur.execute(
@@ -1452,7 +1453,8 @@ async def generate_exam(
                         """,
                         (job_id, None, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty),
                     )
-            logger.info(f"Job {job_id} created in database")
+                    logger.info(f"[GENERATE] Job {job_id} saved to DB: user_id=NULL, device_fp={device_fingerprint[:16]}...")
+            logger.info(f"[GENERATE] Job {job_id} created in database successfully")
             
             # 记录匿名使用（在数据库事务外，避免锁定）
             if not current_user:
@@ -1557,46 +1559,6 @@ async def generate_exam(
     except Exception as e:
         logger.error(f"Unexpected error in generate_exam: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-
-@app.get("/admin/stats")
-async def get_admin_stats(current_user=Depends(get_current_user)):
-    """
-    获取系统统计信息（需要认证）
-    返回：注册用户数量、任务数量等
-    """
-    with get_db() as conn:
-        cur = conn.cursor()
-        
-        # 统计注册用户数量
-        cur.execute("SELECT COUNT(*) as count FROM users")
-        user_count = cur.fetchone()["count"]
-        
-        # 统计任务数量
-        cur.execute("SELECT COUNT(*) as count FROM jobs")
-        job_count = cur.fetchone()["count"]
-        
-        # 统计已完成任务数量
-        cur.execute("SELECT COUNT(*) as count FROM jobs WHERE status = 'done'")
-        completed_job_count = cur.fetchone()["count"]
-        
-        # 统计匿名用户数量（不同的anon_id）
-        cur.execute("SELECT COUNT(DISTINCT anon_id) as count FROM anon_usage")
-        anon_user_count = cur.fetchone()["count"]
-        
-        # 统计有订阅的用户数量
-        cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM subscriptions WHERE status IN ('active', 'trialing', 'past_due')")
-        subscribed_user_count = cur.fetchone()["count"]
-        
-        return {
-            "total_users": user_count,
-            "total_jobs": job_count,
-            "completed_jobs": completed_job_count,
-            "anonymous_users": anon_user_count,
-            "subscribed_users": subscribed_user_count
-        }
-
-
 @app.get("/status/{job_id}")
 async def job_status(
     request: Request,
@@ -1606,16 +1568,24 @@ async def job_status(
     """
     查询 job 状态（支持匿名用户和认证用户）
     """
+    # 调试日志
+    user_info = f"user_id={current_user['id']}" if current_user else "anonymous"
+    logger.info(f"[STATUS] Request for job {job_id}, {user_info}, IP={request.client.host if request.client else 'unknown'}")
+    
     # 从数据库读取任务状态
     with get_db() as conn:
         cur = conn.cursor()
         if current_user:
             # 认证用户：先通过user_id查询
             cur.execute(
-                "SELECT status, error, download_url FROM jobs WHERE id = ? AND user_id = ?",
+                "SELECT status, error, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND user_id = ?",
                 (job_id, current_user["id"]),
             )
             row = cur.fetchone()
+            if row:
+                logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
+            else:
+                logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
                 device_fingerprint = get_device_fingerprint(request)
@@ -1624,11 +1594,16 @@ async def job_status(
                     (job_id, device_fingerprint),
                 )
                 row = cur.fetchone()
+                if row:
+                    logger.info(f"[STATUS] Found job {job_id} by device_fingerprint, user_id in DB={row.get('user_id')}, current_user_id={current_user['id']}")
                 # 如果通过设备指纹找到，验证user_id是否匹配或为NULL
                 if row:
                     # SQLite返回的row是字典，可以直接访问
                     if row.get("user_id") is not None and row.get("user_id") != current_user["id"]:
+                        logger.warning(f"[STATUS] Device fingerprint match but user_id mismatch: DB={row.get('user_id')}, current={current_user['id']}")
                         row = None  # 设备指纹匹配但user_id不匹配，拒绝
+                    elif row.get("user_id") is None:
+                        logger.info(f"[STATUS] Found anonymous job {job_id} for authenticated user {current_user['id']}, will update user_id")
         else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
@@ -1661,6 +1636,10 @@ async def download_exam(
     根据 job_id 返回对应的 PDF（支持匿名用户和认证用户）
     路径约定：build_jobs/{job_id}/build/exam_filled.pdf
     """
+    # 调试日志
+    user_info = f"user_id={current_user['id']}" if current_user else "anonymous"
+    logger.info(f"[DOWNLOAD] Request for job {job_id}, {user_info}, IP={request.client.host if request.client else 'unknown'}")
+    
     # 从数据库验证任务存在且属于当前用户或匿名设备（商用级：移除内存状态）
     with get_db() as conn:
         cur = conn.cursor()
@@ -1671,6 +1650,10 @@ async def download_exam(
                 (job_id, current_user["id"]),
             )
             row = cur.fetchone()
+            if row:
+                logger.info(f"[DOWNLOAD] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
+            else:
+                logger.warning(f"[DOWNLOAD] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             
             # 如果没找到，尝试通过设备指纹验证（可能是IP/User-Agent变化导致user_id查询失败）
             if not row:
@@ -1680,15 +1663,17 @@ async def download_exam(
                     (job_id, device_fingerprint),
                 )
                 row = cur.fetchone()
+                if row:
+                    logger.info(f"[DOWNLOAD] Found job {job_id} by device_fingerprint, user_id in DB={row.get('user_id')}, current_user_id={current_user['id']}")
                 # 如果通过设备指纹找到，且user_id匹配或为NULL，允许访问
                 if row:
                     if row["user_id"] is not None and row["user_id"] != current_user["id"]:
                         # 设备指纹匹配但user_id不匹配，可能是设备被其他用户使用过
-                        logger.warning(f"Device fingerprint match but user_id mismatch for job {job_id}")
+                        logger.warning(f"[DOWNLOAD] Device fingerprint match but user_id mismatch: DB={row.get('user_id')}, current={current_user['id']}")
                         raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
                     # 如果user_id为NULL，可能是匿名用户创建后注册的job，更新user_id
                     elif row["user_id"] is None:
-                        logger.info(f"Found anonymous job {job_id} for authenticated user {current_user['id']}, updating user_id")
+                        logger.info(f"[DOWNLOAD] Found anonymous job {job_id} for authenticated user {current_user['id']}, updating user_id")
                         cur.execute(
                             "UPDATE jobs SET user_id = ? WHERE id = ? AND user_id IS NULL",
                             (current_user["id"], job_id)
@@ -1702,16 +1687,21 @@ async def download_exam(
                     (job_id,),
                 )
                 row = cur.fetchone()
+                if row:
+                    logger.info(f"[DOWNLOAD] Found job {job_id} by job_id only, user_id in DB={row.get('user_id')}, current_user_id={current_user['id']}")
                 # 如果找到但user_id不是当前用户，且不是NULL（匿名用户），则拒绝
                 if row and row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                    logger.warning(f"[DOWNLOAD] Job {job_id} belongs to different user: DB={row.get('user_id')}, current={current_user['id']}")
                     raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
                 # 如果user_id为NULL，尝试通过设备指纹验证
                 elif row and row["user_id"] is None:
                     device_fingerprint = get_device_fingerprint(request)
+                    logger.info(f"[DOWNLOAD] Job {job_id} has NULL user_id, comparing device_fingerprint: DB={row.get('device_fingerprint')[:16] if row.get('device_fingerprint') else 'None'}..., current={device_fingerprint[:16]}...")
                     if row["device_fingerprint"] != device_fingerprint:
+                        logger.warning(f"[DOWNLOAD] Device fingerprint mismatch for job {job_id}")
                         raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
                     # 设备指纹匹配，更新user_id
-                    logger.info(f"Found anonymous job {job_id} for authenticated user {current_user['id']}, updating user_id")
+                    logger.info(f"[DOWNLOAD] Found anonymous job {job_id} for authenticated user {current_user['id']}, updating user_id")
                     cur.execute(
                         "UPDATE jobs SET user_id = ? WHERE id = ? AND user_id IS NULL",
                         (current_user["id"], job_id)
