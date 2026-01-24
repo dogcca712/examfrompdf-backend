@@ -1557,6 +1557,46 @@ async def generate_exam(
     except Exception as e:
         logger.error(f"Unexpected error in generate_exam: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.get("/admin/stats")
+async def get_admin_stats(current_user=Depends(get_current_user)):
+    """
+    获取系统统计信息（需要认证）
+    返回：注册用户数量、任务数量等
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        
+        # 统计注册用户数量
+        cur.execute("SELECT COUNT(*) as count FROM users")
+        user_count = cur.fetchone()["count"]
+        
+        # 统计任务数量
+        cur.execute("SELECT COUNT(*) as count FROM jobs")
+        job_count = cur.fetchone()["count"]
+        
+        # 统计已完成任务数量
+        cur.execute("SELECT COUNT(*) as count FROM jobs WHERE status = 'done'")
+        completed_job_count = cur.fetchone()["count"]
+        
+        # 统计匿名用户数量（不同的anon_id）
+        cur.execute("SELECT COUNT(DISTINCT anon_id) as count FROM anon_usage")
+        anon_user_count = cur.fetchone()["count"]
+        
+        # 统计有订阅的用户数量
+        cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM subscriptions WHERE status IN ('active', 'trialing', 'past_due')")
+        subscribed_user_count = cur.fetchone()["count"]
+        
+        return {
+            "total_users": user_count,
+            "total_jobs": job_count,
+            "completed_jobs": completed_job_count,
+            "anonymous_users": anon_user_count,
+            "subscribed_users": subscribed_user_count
+        }
+
+
 @app.get("/status/{job_id}")
 async def job_status(
     request: Request,
@@ -1622,7 +1662,6 @@ async def download_exam(
     路径约定：build_jobs/{job_id}/build/exam_filled.pdf
     """
     # 从数据库验证任务存在且属于当前用户或匿名设备（商用级：移除内存状态）
-    logger.info(f"Download request for job {job_id}, user: {current_user['id'] if current_user else 'anonymous'}")
     with get_db() as conn:
         cur = conn.cursor()
         if current_user:
@@ -1679,27 +1718,15 @@ async def download_exam(
                     )
                     conn.commit()
         else:
-            # 匿名用户：先通过device_fingerprint查询
+            # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
             cur.execute(
                 "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
                 (job_id, device_fingerprint),
             )
             row = cur.fetchone()
-            
-            # 如果没找到，尝试仅通过job_id查询（允许IP/User-Agent变化的情况）
-            if not row:
-                logger.info(f"Anonymous user: device fingerprint not matched for job {job_id}, trying job_id only")
-                cur.execute(
-                    "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND user_id IS NULL",
-                    (job_id,),
-                )
-                row = cur.fetchone()
-                if row:
-                    logger.info(f"Anonymous user: found job {job_id} by job_id only (device fingerprint may have changed)")
     
     if not row:
-        logger.warning(f"Job {job_id} not found for user {current_user['id'] if current_user else 'anonymous'}")
         raise HTTPException(status_code=404, detail="job not found")
     
     if row["status"] != "done":
@@ -1711,10 +1738,7 @@ async def download_exam(
 
     if not pdf_path.exists():
         logger.error(f"PDF file not found for job {job_id} at {pdf_path}")
-        logger.error(f"Job directory exists: {job_dir.exists()}, build dir exists: {(job_dir / 'build').exists()}")
         raise HTTPException(status_code=404, detail="PDF file not found")
-    
-    logger.info(f"Serving PDF for job {job_id} from {pdf_path}")
 
     return FileResponse(
         path=str(pdf_path),
