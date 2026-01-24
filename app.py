@@ -1679,15 +1679,27 @@ async def download_exam(
                     )
                     conn.commit()
         else:
-            # 匿名用户：通过device_fingerprint查询
+            # 匿名用户：先通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
             cur.execute(
                 "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
                 (job_id, device_fingerprint),
             )
             row = cur.fetchone()
+            
+            # 如果没找到，尝试仅通过job_id查询（允许IP/User-Agent变化的情况）
+            if not row:
+                logger.info(f"Anonymous user: device fingerprint not matched for job {job_id}, trying job_id only")
+                cur.execute(
+                    "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND user_id IS NULL",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    logger.info(f"Anonymous user: found job {job_id} by job_id only (device fingerprint may have changed)")
     
     if not row:
+        logger.warning(f"Job {job_id} not found for user {current_user['id'] if current_user else 'anonymous'}")
         raise HTTPException(status_code=404, detail="job not found")
     
     if row["status"] != "done":
@@ -1699,7 +1711,10 @@ async def download_exam(
 
     if not pdf_path.exists():
         logger.error(f"PDF file not found for job {job_id} at {pdf_path}")
+        logger.error(f"Job directory exists: {job_dir.exists()}, build dir exists: {(job_dir / 'build').exists()}")
         raise HTTPException(status_code=404, detail="PDF file not found")
+    
+    logger.info(f"Serving PDF for job {job_id} from {pdf_path}")
 
     return FileResponse(
         path=str(pdf_path),
