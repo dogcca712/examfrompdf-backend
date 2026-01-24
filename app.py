@@ -1622,6 +1622,7 @@ async def download_exam(
     路径约定：build_jobs/{job_id}/build/exam_filled.pdf
     """
     # 从数据库验证任务存在且属于当前用户或匿名设备（商用级：移除内存状态）
+    logger.info(f"Download request for job {job_id}, user: {current_user['id'] if current_user else 'anonymous'}")
     with get_db() as conn:
         cur = conn.cursor()
         if current_user:
