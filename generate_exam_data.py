@@ -694,9 +694,12 @@ if __name__ == "__main__":
         if attempt == 2:
             raise SystemExit("Too many validation failures.")
 
-        # 让模型修复
-        exam_data = repair_exam_json(raw, errors)
+        # 让模型修复（传递期望的数量以便更准确地修复）
+        exam_data = repair_exam_json(raw, errors, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
         raw = json.dumps(exam_data, ensure_ascii=False)
+        
+        # 重新验证修复后的数据
+        errors = validate_exam_data(exam_data, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
 
     # 生成答案
     print("\n=== Generating answer key ===")
