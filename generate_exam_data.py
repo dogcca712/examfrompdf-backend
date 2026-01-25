@@ -127,8 +127,8 @@ def extract_text_from_pdf(path: str, max_pages: Optional[int] = None) -> str:
                         for table in tables:
                             table_text = "\n".join([" ".join([str(cell) if cell else "" for cell in row]) for row in table])
                             text += "\n" + table_text
-                texts.append(text)
-        return "\n\n".join(texts)
+            texts.append(text)
+    return "\n\n".join(texts)
     # 新逻辑：使用智能采样（但这里不推荐使用，应该用extract_text_from_pdf_with_sampling）
     # 为了向后兼容，保留旧逻辑
     return extract_text_from_pdf_with_sampling(path, target_pages=90, seed=None)
@@ -255,24 +255,37 @@ def build_answer_prompt(exam_data: dict) -> str:
     saq_questions = exam_data["sections"]["saq"]
     lq_questions = exam_data["sections"]["lq"]
     
-    # 构建题目列表
+    # 构建题目列表（根据语言选择格式）
     mcq_list = []
-    for i, q in enumerate(mcq_questions, 1):
-        mcq_list.append(f"Q{i}. {q['stem']}\n选项: {', '.join(q['options'])}")
-    
     saq_list = []
-    for i, q in enumerate(saq_questions, 1):
-        saq_list.append(f"Q{i}. {q['stem']}")
-    
     lq_list = []
-    for i, q in enumerate(lq_questions, 1):
-        lq_list.append(f"Q{i}. {q['stem']}")
     
-    # 检测语言（简单判断：如果包含中文字符，则为中文）
-    has_chinese = any('\u4e00' <= char <= '\u9fff' for char in str(exam_data))
-    language = "中文" if has_chinese else "English"
+    # 检测语言：只检测题目内容，不检测元数据
+    # 检查所有题目的stem，如果大部分是中文，则认为是中文试卷
+    all_question_text = ""
+    for q in mcq_questions:
+        all_question_text += q.get('stem', '') + " ".join(q.get('options', []))
+    for q in saq_questions:
+        all_question_text += q.get('stem', '')
+    for q in lq_questions:
+        all_question_text += q.get('stem', '')
     
-    prompt = f"""基于刚才生成的考试题目，现在请生成详细的答案解析（Answer Key）。
+    # 统计中文字符数量
+    chinese_chars = sum(1 for char in all_question_text if '\u4e00' <= char <= '\u9fff')
+    total_chars = len(all_question_text)
+    # 如果中文字符占比超过10%，认为是中文试卷
+    has_chinese = total_chars > 0 and (chinese_chars / total_chars) > 0.1
+    
+    if has_chinese:
+        # 中文提示词
+        for i, q in enumerate(mcq_questions, 1):
+            mcq_list.append(f"Q{i}. {q['stem']}\n选项: {', '.join(q['options'])}")
+        for i, q in enumerate(saq_questions, 1):
+            saq_list.append(f"Q{i}. {q['stem']}")
+        for i, q in enumerate(lq_questions, 1):
+            lq_list.append(f"Q{i}. {q['stem']}")
+        
+        prompt = f"""基于刚才生成的考试题目，现在请生成详细的答案解析（Answer Key）。
 
 要求：
 
@@ -284,7 +297,7 @@ def build_answer_prompt(exam_data: dict) -> str:
 
 4. 格式清晰，便于教师批改时对照使用
 
-5. 使用与试卷相同的语言（{language}）
+5. 使用中文
 
 请以JSON格式输出，结构如下：
 {{
@@ -321,6 +334,64 @@ def build_answer_prompt(exam_data: dict) -> str:
 {chr(10).join(lq_list)}
 
 请输出严格的JSON格式，不要包含任何额外的文本或markdown代码块。"""
+    else:
+        # 英文提示词
+        for i, q in enumerate(mcq_questions, 1):
+            mcq_list.append(f"Q{i}. {q['stem']}\nOptions: {', '.join(q['options'])}")
+        for i, q in enumerate(saq_questions, 1):
+            saq_list.append(f"Q{i}. {q['stem']}")
+        for i, q in enumerate(lq_questions, 1):
+            lq_list.append(f"Q{i}. {q['stem']}")
+        
+        prompt = f"""Based on the exam questions generated earlier, please generate a detailed answer key.
+
+Requirements:
+
+1. For each Multiple Choice Question (MCQ): Provide the correct option (A/B/C/D) + a brief explanation (explain why this option is correct)
+
+2. For each Short Answer Question: Provide reference answer points + grading criteria
+
+3. For each Long Question: Provide a complete reference answer + detailed grading criteria + common error reminders
+
+4. Clear format, easy for teachers to use when grading
+
+5. Use English
+
+Please output in strict JSON format with the following structure:
+{{
+  "mcq": [
+    {{
+      "correct_option": "A",
+      "explanation": "Explanation content..."
+    }}
+  ],
+  "saq": [
+    {{
+      "answer": "Reference answer points...",
+      "grading_criteria": "Grading criteria..."
+    }}
+  ],
+  "lq": [
+    {{
+      "answer": "Complete answer...",
+      "grading_criteria": "Detailed grading criteria...",
+      "common_errors": "Common error reminders..."
+    }}
+  ]
+}}
+
+Question content:
+
+Multiple Choice Questions:
+{chr(10).join(mcq_list)}
+
+Short Answer Questions:
+{chr(10).join(saq_list)}
+
+Long Questions:
+{chr(10).join(lq_list)}
+
+Please output strict JSON format only, do not include any additional text or markdown code blocks."""
     
     return prompt
 
@@ -427,7 +498,7 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
             f.write(f"Lecture text: {lecture_text_length} chars\n")
             f.write(f"Total: {system_length + prompt_length} chars\n")
         print(f"Prompt saved to: {prompt_file}")
-    
+
     response = client.chat.completions.create(
         model="gpt-5-nano-2025-08-07",  # 默认模型
         messages=[
