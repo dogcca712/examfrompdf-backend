@@ -290,6 +290,7 @@ def build_answer_prompt(exam_data: dict) -> str:
 要求：
 
 1. 对于每道选择题(MCQ)：提供正确答案选项（A/B/C/D）+ 简短解析（解释为什么该选项正确）
+   **重要**：每道题的正确答案可能不同，请仔细分析每道题，不要默认选择A。正确答案应该是A、B、C、D中的任意一个，根据题目内容合理选择。
 
 2. 对于每道简答题(Short Answer)：提供参考答案要点 + 评分标准
 
@@ -348,6 +349,7 @@ def build_answer_prompt(exam_data: dict) -> str:
 Requirements:
 
 1. For each Multiple Choice Question (MCQ): Provide the correct option (A/B/C/D) + a brief explanation (explain why this option is correct)
+   **IMPORTANT**: The correct answer may be different for each question. Please carefully analyze each question and do NOT default to option A. The correct answer should be A, B, C, or D based on the actual question content.
 
 2. For each Short Answer Question: Provide reference answer points + grading criteria
 
