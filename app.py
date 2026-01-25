@@ -2198,8 +2198,9 @@ async def answer_status(
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    answer_status = row.get("answer_status") or "pending"
-    error = row.get("error")
+    # sqlite3.Row 对象使用字典式访问
+    answer_status = row["answer_status"] if row["answer_status"] else "pending"
+    error = row["error"] if row["error"] else None
     
     result = {
         "status": answer_status
