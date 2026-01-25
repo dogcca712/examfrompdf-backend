@@ -1,0 +1,175 @@
+\documentclass[12pt]{article}
+
+% ---- Fixed packages (do not change dynamically) ----
+% 中文支持：如果内容包含中文，ctex会自动处理；如果不包含，pdflatex也能正常编译
+\usepackage[UTF8]{ctex} % 中文支持（pdflatex会忽略，xelatex会使用）
+\usepackage[T1]{fontenc}
+\usepackage{lmodern} % Latin Modern: paper-like look
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{needspace}
+\usepackage{fancyhdr}
+\usepackage{setspace}
+\usepackage{microtype}
+\usepackage{tcolorbox} % 用于美观的Solution框
+\usepackage{xcolor} % 颜色支持
+
+% ---- Fixed page setup ----
+\geometry{a4paper, margin=25mm}
+\setstretch{1.15}
+
+% ---- Fix fancyhdr headheight warning ----
+\setlength{\headheight}{14.49998pt}
+\addtolength{\topmargin}{-2.49998pt}
+
+% ---- Header / footer ----
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\textit{((( course_code )))}}   % e.g., INFO1111
+\rhead{\textit{Answer Key}}
+\cfoot{\thepage}
+
+% ---- Color definitions ----
+\definecolor{solutionblue}{RGB}{230, 240, 255} % 浅蓝色背景
+\definecolor{explanationgray}{RGB}{245, 245, 245} % 浅灰色背景
+
+% ---- Solution box style ----
+\tcbuselibrary{breakable}
+\newtcolorbox{solutionbox}{
+    colback=solutionblue,
+    colframe=blue!50!black,
+    boxrule=1pt,
+    arc=3pt,
+    left=8pt,
+    right=8pt,
+    top=6pt,
+    bottom=6pt,
+    breakable,
+    fonttitle=\bfseries,
+    title=Solution:,
+    before skip=0.5em,
+    after skip=0.8em
+}
+
+% ---- Explanation box style (for MCQ) ----
+\newtcolorbox{explanationbox}{
+    colback=explanationgray,
+    colframe=gray!50!black,
+    boxrule=0.8pt,
+    arc=2pt,
+    left=6pt,
+    right=6pt,
+    top=4pt,
+    bottom=4pt,
+    breakable,
+    before skip=0.3em,
+    after skip=0.5em
+}
+
+% ---- Utility macros ----
+\newcommand{\AnswerTitle}[1]{\begin{center}\Large\textbf{#1}\end{center}\vspace{0.5em}}
+\newcommand{\AnswerMeta}[2]{%
+\vspace{-0.3em}
+\noindent\textbf{Course:} #1 \hfill \textbf{Date:} #2\\
+\vspace{0.8em}
+}
+
+% Keep answers from splitting badly
+\newcommand{\ABlockStart}[1]{\needspace{#1\baselineskip}}
+
+% ---------------- Answer macros ----------------
+% MCQ Answer:
+%  #1 question number
+%  #2 correct option (A/B/C/D)
+%  #3 explanation
+\newcommand{\MCQAnswer}[3]{%
+\ABlockStart{8}
+\noindent\textbf{Q#1.} \textbf{答案：#2}\\
+\begin{explanationbox}
+\textit{解析：} #3
+\end{explanationbox}
+\vspace{0.4em}
+}
+
+% SAQ/LQ Answer:
+%  #1 question number
+%  #2 answer content
+%  #3 grading criteria (optional)
+\newcommand{\SAQAnswer}[3]{%
+\ABlockStart{12}
+\noindent\textbf{Q#1.}
+\begin{solutionbox}
+#2
+\vspace{0.5em}
+\noindent\textit{评分标准：} #3
+\end{solutionbox}
+\vspace{0.6em}
+}
+
+% LQ Answer with common errors:
+%  #1 question number
+%  #2 answer content
+%  #3 grading criteria
+%  #4 common errors (optional)
+\newcommand{\LQAnswer}[4]{%
+\ABlockStart{16}
+\noindent\textbf{Q#1.}
+\begin{solutionbox}
+#2
+\vspace{0.5em}
+\noindent\textit{评分细则：} #3
+\vspace{0.5em}
+\noindent\textit{常见错误提醒：} #4
+\end{solutionbox}
+\vspace{0.6em}
+}
+
+
+\begin{document}
+
+\AnswerTitle{((( exam_title ))) - Answer Key}
+\AnswerMeta{((( course_name ))) }{((( exam_date )))}
+
+\noindent\textbf{Instructions for Graders}
+\begin{itemize}[itemsep=0.2em, topsep=0.2em]
+  \item This document contains detailed answers and grading criteria.
+  \item Use this as a reference when grading student submissions.
+  \item Partial credit should be awarded based on the grading criteria provided.
+\end{itemize}
+
+\vspace{0.8em}
+
+% ---------------- Section A: Multiple Choice Answers ----------------
+\noindent\Large\textbf{Section A: Multiple Choice Answers}\normalsize\\
+\vspace{0.5em}
+
+% --- MCQ Answers generated from JSON ---
+((* for answer in mcq_answers *))
+\MCQAnswer{((( loop.index )))}{((( answer.correct_option )))}{((( answer.explanation )))}
+((* endfor *))
+
+\newpage
+
+% ---------------- Section B: Short Answer Questions ----------------
+\noindent\Large\textbf{Section B: Short Answer Questions}\normalsize\\
+\vspace{0.5em}
+
+% --- SAQ Answers generated from JSON ---
+((* for answer in saq_answers *))
+\SAQAnswer{((( loop.index )))}{((( answer.answer )))}{((( answer.grading_criteria )))}
+((* endfor *))
+
+\newpage
+
+% ---------------- Section C: Long Questions ----------------
+\noindent\Large\textbf{Section C: Long Questions}\normalsize\\
+\vspace{0.5em}
+
+% --- LQ Answers generated from JSON ---
+((* for answer in lq_answers *))
+\LQAnswer{((( loop.index )))}{((( answer.answer )))}{((( answer.grading_criteria )))}{((( answer.common_errors )))}
+((* endfor *))
+
+\end{document}
+

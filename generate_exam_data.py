@@ -1,11 +1,13 @@
 import os
 import json
 import random
+import logging
 from typing import Optional, List, Tuple
 import pdfplumber
 from openai import OpenAI  # 如果你用的是 openai 官方 SDK
 
 client = OpenAI()
+logger = logging.getLogger(__name__)
 
 def get_pdf_page_count(path: str) -> int:
     """获取PDF的总页数"""
@@ -242,6 +244,138 @@ Lecture material:
 -----------------
 """
 
+
+
+def build_answer_prompt(exam_data: dict) -> str:
+    """
+    构建生成答案的提示词
+    """
+    # 提取题目信息
+    mcq_questions = exam_data["sections"]["mcq"]
+    saq_questions = exam_data["sections"]["saq"]
+    lq_questions = exam_data["sections"]["lq"]
+    
+    # 构建题目列表
+    mcq_list = []
+    for i, q in enumerate(mcq_questions, 1):
+        mcq_list.append(f"Q{i}. {q['stem']}\n选项: {', '.join(q['options'])}")
+    
+    saq_list = []
+    for i, q in enumerate(saq_questions, 1):
+        saq_list.append(f"Q{i}. {q['stem']}")
+    
+    lq_list = []
+    for i, q in enumerate(lq_questions, 1):
+        lq_list.append(f"Q{i}. {q['stem']}")
+    
+    # 检测语言（简单判断：如果包含中文字符，则为中文）
+    has_chinese = any('\u4e00' <= char <= '\u9fff' for char in str(exam_data))
+    language = "中文" if has_chinese else "English"
+    
+    prompt = f"""基于刚才生成的考试题目，现在请生成详细的答案解析（Answer Key）。
+
+要求：
+
+1. 对于每道选择题(MCQ)：提供正确答案选项（A/B/C/D）+ 简短解析（解释为什么该选项正确）
+
+2. 对于每道简答题(Short Answer)：提供参考答案要点 + 评分标准
+
+3. 对于每道论述题(Long Question)：提供完整的参考答案 + 评分细则 + 常见错误提醒
+
+4. 格式清晰，便于教师批改时对照使用
+
+5. 使用与试卷相同的语言（{language}）
+
+请以JSON格式输出，结构如下：
+{{
+  "mcq": [
+    {{
+      "correct_option": "A",
+      "explanation": "解析内容..."
+    }}
+  ],
+  "saq": [
+    {{
+      "answer": "参考答案要点...",
+      "grading_criteria": "评分标准..."
+    }}
+  ],
+  "lq": [
+    {{
+      "answer": "完整答案...",
+      "grading_criteria": "评分细则...",
+      "common_errors": "常见错误提醒..."
+    }}
+  ]
+}}
+
+题目内容：
+
+选择题：
+{chr(10).join(mcq_list)}
+
+简答题：
+{chr(10).join(saq_list)}
+
+论述题：
+{chr(10).join(lq_list)}
+
+请输出严格的JSON格式，不要包含任何额外的文本或markdown代码块。"""
+    
+    return prompt
+
+
+def generate_answer_key(exam_data: dict) -> dict:
+    """
+    生成答案JSON数据
+    
+    参数：
+    - exam_data: 已生成的exam_data字典
+    
+    返回：
+    - 答案字典，包含mcq、saq、lq的答案
+    """
+    prompt = build_answer_prompt(exam_data)
+    
+    system_content = "You are an expert exam answer key generator. You always output strict JSON, no extra text."
+    
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": system_content
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2,
+    )
+    
+    raw = response.choices[0].message.content.strip()
+    # 清洗markdown代码块
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+    
+    answer_data = json.loads(raw)
+    
+    # 验证答案结构
+    if "mcq" not in answer_data or "saq" not in answer_data or "lq" not in answer_data:
+        raise ValueError("Answer key must contain 'mcq', 'saq', and 'lq' fields")
+    
+    # 验证答案数量是否匹配
+    if len(answer_data["mcq"]) != len(exam_data["sections"]["mcq"]):
+        raise ValueError(f"MCQ answer count ({len(answer_data['mcq'])}) doesn't match question count ({len(exam_data['sections']['mcq'])})")
+    if len(answer_data["saq"]) != len(exam_data["sections"]["saq"]):
+        raise ValueError(f"SAQ answer count ({len(answer_data['saq'])}) doesn't match question count ({len(exam_data['sections']['saq'])})")
+    if len(answer_data["lq"]) != len(exam_data["sections"]["lq"]):
+        raise ValueError(f"LQ answer count ({len(answer_data['lq'])}) doesn't match question count ({len(exam_data['sections']['lq'])})")
+    
+    return answer_data
 
 
 def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium", special_requests: Optional[str] = None) -> dict:
@@ -564,6 +698,18 @@ if __name__ == "__main__":
         exam_data = repair_exam_json(raw, errors)
         raw = json.dumps(exam_data, ensure_ascii=False)
 
+    # 生成答案
+    print("\n=== Generating answer key ===")
+    try:
+        answer_key = generate_answer_key(exam_data)
+        exam_data["answers"] = answer_key
+        print("Answer key generated successfully")
+    except Exception as e:
+        print(f"Warning: Failed to generate answer key: {e}")
+        # 如果生成答案失败，仍然保存exam_data（不包含answers字段）
+        if logger:
+            logger.warning(f"Answer key generation failed: {e}")
+    
     # 确保输出目录存在
     output_path.parent.mkdir(parents=True, exist_ok=True)
     

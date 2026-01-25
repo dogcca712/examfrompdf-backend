@@ -1272,6 +1272,57 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
                 if warnings:
                     logger.warning(f"LaTeX warnings: {warnings[:5]}")  # 只记录前5个警告
 
+        # 4) 生成答案PDF（如果exam_data.json包含answers字段）
+        answer_pdf_path = None
+        exam_data_path = job_dir / "exam_data.json"
+        if exam_data_path.exists():
+            try:
+                import json
+                with open(exam_data_path, "r", encoding="utf-8") as f:
+                    exam_data = json.load(f)
+                
+                if "answers" in exam_data:
+                    logger.info(f"Generating answer PDF for job {job_id}")
+                    
+                    # 渲染答案LaTeX
+                    env = os.environ.copy()
+                    env["EXAMGEN_OUTPUT_DIR"] = str(job_dir / "build")
+                    env["EXAMGEN_EXAM_DATA"] = str(exam_data_path)
+                    subprocess.run(
+                        [sys.executable, str(BASE_DIR / "render_answer.py")],
+                        cwd=str(BASE_DIR),
+                        check=True,
+                        env=env,
+                    )
+                    
+                    # 编译答案PDF
+                    answer_tex_path = job_dir / "build" / "answer_filled.tex"
+                    if answer_tex_path.exists():
+                        # 检测是否需要中文支持
+                        with open(answer_tex_path, "r", encoding="utf-8") as f:
+                            answer_tex_content = f.read()
+                        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in answer_tex_content)
+                        compiler = "xelatex" if has_chinese else "pdflatex"
+                        
+                        result = subprocess.run(
+                            [compiler, "-interaction=nonstopmode", "-output-directory", str(job_dir / "build"), str(answer_tex_path)],
+                            capture_output=True,
+                            text=True,
+                        )
+                        
+                        answer_pdf_path = job_dir / "build" / "answer_filled.pdf"
+                        if answer_pdf_path.exists():
+                            logger.info(f"Answer PDF generated successfully: {answer_pdf_path}")
+                        else:
+                            logger.warning(f"Answer PDF was not generated (exit code: {result.returncode})")
+                    else:
+                        logger.warning(f"Answer LaTeX file not found: {answer_tex_path}")
+                else:
+                    logger.info(f"No answers field in exam_data.json, skipping answer PDF generation")
+            except Exception as e:
+                logger.error(f"Failed to generate answer PDF: {e}", exc_info=True)
+                # 答案PDF生成失败不影响主流程
+
         # 更新数据库（商用级：移除内存状态）
         download_url = f"/download/{job_id}"
         with get_db() as conn:
@@ -1805,4 +1856,58 @@ async def download_exam(
         path=str(pdf_path),
         media_type="application/pdf",
         filename="exam_generated.pdf",
+    )
+
+
+@app.get("/download_answer/{job_id}")
+async def download_answer(
+    request: Request,
+    job_id: str, 
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """
+    根据 job_id 返回对应的答案 PDF
+    路径约定：build_jobs/{job_id}/build/answer_filled.pdf
+    """
+    # 调试日志
+    user_info = f"user_id={current_user['id']}" if current_user else "anonymous"
+    logger.info(f"[DOWNLOAD_ANSWER] Request for job {job_id}, {user_info}, IP={request.client.host}")
+    
+    # 验证job是否存在且属于当前用户
+    with get_db() as conn:
+        cur = conn.cursor()
+        if current_user:
+            # 认证用户：通过user_id查询
+            cur.execute(
+                "SELECT status, download_url, user_id FROM jobs WHERE id = ? AND user_id = ?",
+                (job_id, current_user["id"]),
+            )
+            row = cur.fetchone()
+        else:
+            # 匿名用户：通过device_fingerprint查询
+            device_fingerprint = get_device_fingerprint(request)
+            cur.execute(
+                "SELECT status, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
+                (job_id, device_fingerprint),
+            )
+            row = cur.fetchone()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="job not found")
+    
+    if row["status"] != "done":
+        raise HTTPException(status_code=400, detail="Job not completed yet")
+    
+    # 从文件系统读取答案PDF
+    job_dir = BUILD_ROOT / job_id
+    answer_pdf_path = job_dir / "build" / "answer_filled.pdf"
+    
+    if not answer_pdf_path.exists():
+        logger.error(f"Answer PDF file not found for job {job_id} at {answer_pdf_path}")
+        raise HTTPException(status_code=404, detail="Answer PDF file not found")
+    
+    return FileResponse(
+        path=str(answer_pdf_path),
+        media_type="application/pdf",
+        filename="answer_key.pdf",
     )
