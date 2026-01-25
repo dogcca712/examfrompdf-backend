@@ -154,6 +154,7 @@ def init_db():
                 short_answer_count INTEGER DEFAULT 3,  -- 简答题数量
                 long_question_count INTEGER DEFAULT 1,  -- 论述题数量
                 difficulty TEXT DEFAULT 'medium',  -- 难度等级: easy, medium, hard
+                special_requests TEXT,  -- 用户特殊要求
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
             """
@@ -299,6 +300,7 @@ def migrate_db():
                         short_answer_count INTEGER DEFAULT 3,
                         long_question_count INTEGER DEFAULT 1,
                         difficulty TEXT DEFAULT 'medium',
+                        special_requests TEXT,
                         FOREIGN KEY(user_id) REFERENCES users(id)
                     )
                 """)
@@ -1129,7 +1131,8 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
             "mcq_count": 10,
             "short_answer_count": 3,
             "long_question_count": 1,
-            "difficulty": "medium"
+            "difficulty": "medium",
+            "special_requests": None
         }
     
     job_dir = BUILD_ROOT / job_id
@@ -1139,7 +1142,7 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -1166,7 +1169,9 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
         env["EXAMGEN_SHORT_ANSWER_COUNT"] = str(exam_config["short_answer_count"])
         env["EXAMGEN_LONG_QUESTION_COUNT"] = str(exam_config["long_question_count"])
         env["EXAMGEN_DIFFICULTY"] = exam_config["difficulty"]
-        logger.info(f"Passing exam config to generate_exam_data.py: MCQ={exam_config['mcq_count']}, SAQ={exam_config['short_answer_count']}, LQ={exam_config['long_question_count']}, Difficulty={exam_config['difficulty']}")
+        if exam_config.get("special_requests"):
+            env["EXAMGEN_SPECIAL_REQUESTS"] = exam_config["special_requests"]
+        logger.info(f"Passing exam config to generate_exam_data.py: MCQ={exam_config['mcq_count']}, SAQ={exam_config['short_answer_count']}, LQ={exam_config['long_question_count']}, Difficulty={exam_config['difficulty']}, SpecialRequests={exam_config.get('special_requests', 'None')[:50] if exam_config.get('special_requests') else 'None'}...")
         subprocess.run(
             [sys.executable, str(BASE_DIR / "generate_exam_data.py"), str(job_lecture), str(job_exam_data_json)],
             cwd=str(BASE_DIR),
@@ -1354,6 +1359,7 @@ async def generate_exam(
     short_answer_count: int = Form(3),
     long_question_count: int = Form(1),
     difficulty: str = Form("medium"),
+    special_requests: Optional[str] = Form(None),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """
@@ -1366,14 +1372,15 @@ async def generate_exam(
     - short_answer_count: 简答题数量（默认3）
     - long_question_count: 论述题数量（默认1）
     - difficulty: 难度等级（easy/medium/hard，默认medium）
+    - special_requests: 用户特殊要求（可选，字符串）
     """
     try:
         # 记录接收到的参数（用于调试）
-        logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
+        logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests[:50] if special_requests else 'None'}...")
         
         # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    if lecture_pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
         
         # 验证参数
         if mcq_count < 0 or mcq_count > 50:
@@ -1422,7 +1429,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -1439,20 +1446,20 @@ async def generate_exam(
                     # 认证用户：同时保存user_id和设备指纹
                     cur.execute(
                         """
-                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at, mcq_count, short_answer_count, long_question_count, difficulty)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at, mcq_count, short_answer_count, long_question_count, difficulty, special_requests)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (job_id, user_id, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty),
+                        (job_id, user_id, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty, special_requests),
                     )
                     logger.info(f"[GENERATE] Job {job_id} saved to DB: user_id={user_id}, device_fp={device_fingerprint[:16]}...")
                 else:
                     # 匿名用户：记录设备指纹，user_id为NULL
                     cur.execute(
                         """
-                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at, mcq_count, short_answer_count, long_question_count, difficulty)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO jobs (id, user_id, device_fingerprint, file_name, status, created_at, updated_at, mcq_count, short_answer_count, long_question_count, difficulty, special_requests)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (job_id, None, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty),
+                        (job_id, None, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty, special_requests),
                     )
                     logger.info(f"[GENERATE] Job {job_id} saved to DB: user_id=NULL, device_fp={device_fingerprint[:16]}...")
             logger.info(f"[GENERATE] Job {job_id} created in database successfully")
@@ -1471,16 +1478,16 @@ async def generate_exam(
         # 使用 BUILD_ROOT 保持一致性
         job_dir = BUILD_ROOT / job_id
         try:
-            job_dir.mkdir(parents=True, exist_ok=True)
+    job_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.error(f"Failed to create job directory: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job directory")
 
         # 保存文件（添加大小检查和错误处理）
-        lecture_path = job_dir / "lecture.pdf"
+    lecture_path = job_dir / "lecture.pdf"
         file_size = 0
         try:
-            with lecture_path.open("wb") as f:
+    with lecture_path.open("wb") as f:
                 # 分块读取，避免内存问题，同时检查大小
                 # 使用 read() 方法（同步，但在异步上下文中可以接受）
                 chunk_size = 8192  # 8KB chunks
@@ -1528,7 +1535,8 @@ async def generate_exam(
             "mcq_count": mcq_count,
             "short_answer_count": short_answer_count,
             "long_question_count": long_question_count,
-            "difficulty": difficulty
+            "difficulty": difficulty,
+            "special_requests": special_requests
         }
         try:
             job_queue.put((job_id, lecture_path, exam_config))
@@ -1585,7 +1593,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:

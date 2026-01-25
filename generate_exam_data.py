@@ -29,7 +29,7 @@ def extract_text_from_pdf(path: str, max_pages: int = 10) -> str:
     return result
 
 
-def build_prompt(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium") -> str:
+def build_prompt(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium", special_requests: Optional[str] = None) -> str:
     """
     构造发给 LLM 的 user prompt，要求它输出 exam_data.json 所需的结构。
     这版加入了"禁止出元信息题"的约束，并支持自定义题目数量和难度。
@@ -39,6 +39,7 @@ def build_prompt(lecture_text: str, mcq_count: int = 10, short_answer_count: int
     - short_answer_count: 简答题数量
     - long_question_count: 论述题数量
     - difficulty: 难度等级 (easy/medium/hard)
+    - special_requests: 用户特殊要求（可选）
     """
     # 难度描述
     difficulty_descriptions = {
@@ -123,7 +124,7 @@ Lecture material:
 
 
 
-def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium") -> dict:
+def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium", special_requests: Optional[str] = None) -> dict:
     """
     生成exam JSON数据
     
@@ -133,8 +134,9 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
     - short_answer_count: 简答题数量
     - long_question_count: 论述题数量
     - difficulty: 难度等级
+    - special_requests: 用户特殊要求（可选）
     """
-    prompt = build_prompt(lecture_text, mcq_count, short_answer_count, long_question_count, difficulty)
+    prompt = build_prompt(lecture_text, mcq_count, short_answer_count, long_question_count, difficulty, special_requests)
 
     response = client.chat.completions.create(
         model="gpt-4.1-mini",  # 或你想用的其它模型
