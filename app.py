@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Body
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -1057,9 +1057,8 @@ async def get_subscription(current_user=Depends(get_current_user)):
 
 @app.post("/payments/purchase-download")
 async def purchase_download(
-    payload: Dict[str, Any],
+    payload: Dict[str, Any] = Body(...),
     current_user=Depends(get_current_user),
-    request: Request = None
 ):
     """
     购买下载权限的支付端点
