@@ -100,6 +100,8 @@ Important global rules:
 Difficulty Level:
 {difficulty_instruction}
 
+{f"用户特殊要求: {special_requests}" if special_requests else ""}
+
 Question-specific requirements:
 - "mcq" must contain EXACTLY {mcq_count} multiple-choice questions.
 - Each MCQ must:
@@ -138,12 +140,17 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
     """
     prompt = build_prompt(lecture_text, mcq_count, short_answer_count, long_question_count, difficulty, special_requests)
 
+    # 构建 system prompt，包含用户特殊要求
+    system_content = "You are an expert exam generator for university-level courses. You always output strict JSON, no extra text."
+    if special_requests:
+        system_content += f"\n\n用户特殊要求: {special_requests}"
+    
     response = client.chat.completions.create(
         model="gpt-4.1-mini",  # 或你想用的其它模型
         messages=[
             {
                 "role": "system",
-                "content": "You are an expert exam generator for university-level courses. You always output strict JSON, no extra text."
+                "content": system_content
             },
             {
                 "role": "user",
@@ -340,15 +347,16 @@ if __name__ == "__main__":
     short_answer_count = int(os.environ.get("EXAMGEN_SHORT_ANSWER_COUNT", "3"))
     long_question_count = int(os.environ.get("EXAMGEN_LONG_QUESTION_COUNT", "1"))
     difficulty = os.environ.get("EXAMGEN_DIFFICULTY", "medium")
+    special_requests = os.environ.get("EXAMGEN_SPECIAL_REQUESTS", None)
     
     text = extract_text_from_pdf(pdf_path)
 
     print(f"Extracted text length: {len(text)}")
     print(f"PDF path: {pdf_path}")
     print(f"Output JSON path: {output_path}")
-    print(f"Exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
+    print(f"Exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests or 'None'}")
 
-    exam_data, raw = generate_exam_json(text, mcq_count, short_answer_count, long_question_count, difficulty)
+    exam_data, raw = generate_exam_json(text, mcq_count, short_answer_count, long_question_count, difficulty, special_requests)
 
     for attempt in range(3):  # 最多 3 次（第一次生成 + 2 次修复）
         errors = validate_exam_data(exam_data, strict_counts=True, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
