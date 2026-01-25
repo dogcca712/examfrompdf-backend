@@ -721,16 +721,41 @@ if __name__ == "__main__":
     # 验证exam数据
     errors = validate_exam_data(exam_data, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
     
-    # 如果验证失败，尝试修复（最多3次）
-    for attempt in range(3):
+    # 如果验证失败，尝试修复（最多5次，因为数量问题可能需要多次修复）
+    max_attempts = 5
+    for attempt in range(max_attempts):
         if not errors:
             break
 
-        print("\nVALIDATION FAILED (attempt %d):" % (attempt + 1))
+        print("\nVALIDATION FAILED (attempt %d/%d):" % (attempt + 1, max_attempts))
         for e in errors:
             print("-", e)
 
-        if attempt == 2:
+        if attempt == max_attempts - 1:
+            # 最后一次尝试：如果只是数量问题，手动修复
+            print("\nLast attempt: Trying manual count fix...")
+            try:
+                # 手动调整数量（只处理数量过多的情况）
+                if len(exam_data["sections"]["mcq"]) > mcq_count:
+                    exam_data["sections"]["mcq"] = exam_data["sections"]["mcq"][:mcq_count]
+                    print(f"Manually removed {len(exam_data['sections']['mcq']) - mcq_count} extra MCQ(s)")
+                
+                if len(exam_data["sections"]["saq"]) > short_answer_count:
+                    exam_data["sections"]["saq"] = exam_data["sections"]["saq"][:short_answer_count]
+                    print(f"Manually removed {len(exam_data['sections']['saq']) - short_answer_count} extra SAQ(s)")
+                
+                if len(exam_data["sections"]["lq"]) > long_question_count:
+                    exam_data["sections"]["lq"] = exam_data["sections"]["lq"][:long_question_count]
+                    print(f"Manually removed {len(exam_data['sections']['lq']) - long_question_count} extra LQ(s)")
+                
+                # 重新验证
+                errors = validate_exam_data(exam_data, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
+                if not errors:
+                    print("Manual fix successful!")
+                    break
+            except Exception as e:
+                print(f"Manual fix failed: {e}")
+            
             raise SystemExit("Too many validation failures.")
 
         # 让模型修复（传递期望的数量以便更准确地修复）
