@@ -51,6 +51,15 @@ PRICE_IDS = {
     "pro": os.environ.get("STRIPE_PRICE_PRO", ""),
 }
 
+# Mock 支付配置（仅用于开发/测试环境）
+ENABLE_MOCK_PAYMENT = os.environ.get("ENABLE_MOCK_PAYMENT", "false").lower() == "true"
+# 生产环境检查：如果域名是生产域名，强制禁用 mock
+PRODUCTION_DOMAINS = ["examfrompdf.com", "www.examfrompdf.com"]
+IS_PRODUCTION = any(domain in os.environ.get("API_BASE_URL", "") for domain in PRODUCTION_DOMAINS)
+if IS_PRODUCTION and ENABLE_MOCK_PAYMENT:
+    logger.warning("Mock payment is disabled in production environment")
+    ENABLE_MOCK_PAYMENT = False
+
 PLAN_LIMITS = {
     "free": {"daily": 9999, "monthly": 9999},  # 测试阶段：临时提高限额
     "starter": {"daily": 999999, "monthly": 10},
@@ -1046,6 +1055,79 @@ async def get_subscription(current_user=Depends(get_current_user)):
     }
 
 
+@app.post("/payments/purchase-download")
+async def purchase_download(
+    payload: Dict[str, Any],
+    current_user=Depends(get_current_user),
+    request: Request = None
+):
+    """
+    购买下载权限的支付端点
+    
+    请求体：
+    - job_id: 要购买的job ID（可选）
+    - amount: 金额（美分，可选，默认值由后端决定）
+    
+    返回：
+    - Mock模式: { "success": true, "unlocked": true }
+    - 正常模式: { "checkout_url": "..." }
+    """
+    # Mock 模式：直接返回成功
+    if ENABLE_MOCK_PAYMENT:
+        logger.info(f"Mock payment enabled: granting download access for user {current_user['id']}")
+        # 如果提供了job_id，可以在这里记录购买记录（可选）
+        job_id = payload.get("job_id")
+        if job_id:
+            logger.info(f"Mock payment: unlocking job {job_id} for user {current_user['id']}")
+        return {"success": True, "unlocked": True}
+    
+    # 正常模式：创建 Stripe Checkout Session
+    if not STRIPE_API_KEY:
+        raise HTTPException(status_code=500, detail="Stripe API key not configured")
+    
+    # 获取金额（美分），如果没有提供则使用默认值
+    amount = payload.get("amount", 299)  # 默认 $2.99
+    if not isinstance(amount, int) or amount < 50:  # 最少 $0.50
+        raise HTTPException(status_code=400, detail="Invalid amount (minimum 50 cents)")
+    
+    job_id = payload.get("job_id", "")
+    
+    # 构建成功和取消URL
+    base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com")
+    success_url = f"{base_url}/payments/success?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{base_url}/payments/cancel"
+    
+    # 创建一次性支付的 Checkout Session
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",  # 一次性支付，不是订阅
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {
+                        "name": "Exam Download Access",
+                        "description": f"Download access for exam{' ' + job_id if job_id else ''}",
+                    },
+                    "unit_amount": amount,  # 金额（美分）
+                },
+                "quantity": 1,
+            }],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            customer_email=current_user["email"],
+            metadata={
+                "user_id": str(current_user["id"]),
+                "type": "download_purchase",
+                "job_id": job_id if job_id else "",
+            },
+        )
+        logger.info(f"Created checkout session {session.id} for user {current_user['id']}, amount: ${amount/100:.2f}")
+        return {"checkout_url": session.url}
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating checkout session: {e}")
+        raise HTTPException(status_code=500, detail=f"Payment processing error: {str(e)}")
+
+
 # -------------------- 用量 API --------------------
 @app.get("/usage/status")
 async def usage_status(current_user=Depends(get_current_user)):
@@ -1162,13 +1244,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         else:
             job_lecture = lecture_path  # 已经是正确位置了
         
@@ -1331,7 +1413,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
                         logger.warning(f"Answer LaTeX file not found: {answer_tex_path}")
                 else:
                     logger.info(f"No answers field in exam_data.json for job {job_id}, skipping answer PDF generation")
-            except Exception as e:
+    except Exception as e:
                 logger.error(f"Failed to generate answer PDF: {e}", exc_info=True)
                 # 答案PDF生成失败不影响主流程
 
@@ -1538,7 +1620,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(lecture_pdf) == 1:
             file_name = lecture_pdf[0].filename or "lecture.pdf"
@@ -1718,7 +1800,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
