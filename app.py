@@ -1500,7 +1500,7 @@ async def generate_exam(
             lecture_path = job_dir / "lecture.pdf"
         file_size = 0
         try:
-    with lecture_path.open("wb") as f:
+            with lecture_path.open("wb") as f:
                 # 分块读取，避免内存问题，同时检查大小
                 # 使用 read() 方法（同步，但在异步上下文中可以接受）
                 chunk_size = 8192  # 8KB chunks
