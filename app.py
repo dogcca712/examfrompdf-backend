@@ -1066,14 +1066,15 @@ async def get_subscription(current_user=Depends(get_current_user)):
 
 @app.post("/payments/purchase-download")
 async def purchase_download(
+    request: Request,
     payload: Dict[str, Any] = Body(...),
-    current_user=Depends(get_current_user),
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional),
 ):
     """
-    购买下载权限的支付端点
+    购买下载权限的支付端点（支持匿名用户和认证用户）
     
     请求体：
-    - job_id: 要购买的job ID（可选）
+    - job_id: 要购买的job ID（必需）
     - amount: 金额（美分，可选，默认值由后端决定）
     
     返回：
@@ -1081,17 +1082,48 @@ async def purchase_download(
     - 正常模式: { "checkout_url": "..." }
     """
     try:
-        logger.info(f"[PURCHASE-DOWNLOAD] Request from user {current_user['id']}, payload: {payload}")
+        job_id = payload.get("job_id")
+        if not job_id:
+            raise HTTPException(status_code=400, detail="job_id is required")
+        
+        user_info = f"user_id={current_user['id']}" if current_user else "anonymous"
+        logger.info(f"[PURCHASE-DOWNLOAD] Request from {user_info}, job_id={job_id}, payload={payload}")
+        
+        # 验证 job 是否存在且属于当前用户/设备
+        with get_db() as conn:
+            cur = conn.cursor()
+            if current_user:
+                # 认证用户：验证 job 属于该用户
+                cur.execute(
+                    "SELECT id, user_id, device_fingerprint FROM jobs WHERE id = ?",
+                    (job_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Job not found")
+                # 如果 job 有 user_id，必须匹配
+                if row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                    raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+            else:
+                # 匿名用户：验证 job 属于该设备
+                device_fingerprint = get_device_fingerprint(request)
+                cur.execute(
+                    "SELECT id, user_id, device_fingerprint FROM jobs WHERE id = ?",
+                    (job_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Job not found")
+                # 如果 job 有 user_id，匿名用户不能访问
+                if row["user_id"] is not None:
+                    raise HTTPException(status_code=403, detail="Access denied: this job belongs to a registered user. Please log in.")
+                # 验证设备指纹
+                if row["device_fingerprint"] != device_fingerprint:
+                    raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
         
         # Mock 模式：直接返回成功
         if ENABLE_MOCK_PAYMENT:
-            logger.info(f"Mock payment enabled: granting download access for user {current_user['id']}")
-            # 如果提供了job_id，可以在这里记录购买记录（可选）
-            job_id = payload.get("job_id")
-            if job_id:
-                logger.info(f"Mock payment: unlocking job {job_id} for user {current_user['id']}")
-                # 不再自动生成答案，等用户付款后通过 /generate_answer/{job_id} 触发
-                pass
+            logger.info(f"Mock payment enabled: granting download access for {user_info}, job_id={job_id}")
             return {"success": True, "unlocked": True}
         
         # 正常模式：创建 Stripe Checkout Session
@@ -1099,9 +1131,7 @@ async def purchase_download(
             # 如果没有配置 Stripe 且不在生产环境，自动启用 Mock 模式
             if not IS_PRODUCTION:
                 logger.warning("Stripe API key not configured, but not in production. Using mock mode as fallback.")
-                job_id = payload.get("job_id")
-                if job_id:
-                    logger.info(f"Mock payment (fallback): unlocking job {job_id} for user {current_user['id']}")
+                logger.info(f"Mock payment (fallback): unlocking job {job_id} for {user_info}")
                 return {"success": True, "unlocked": True}
             else:
                 logger.error("Stripe API key not configured in production environment")
@@ -1113,40 +1143,54 @@ async def purchase_download(
             logger.warning(f"Invalid amount: {amount}")
             raise HTTPException(status_code=400, detail="Invalid amount (minimum 50 cents)")
         
-        job_id = payload.get("job_id", "")
-        
         # 构建成功和取消URL
         base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com")
         success_url = f"{base_url}/payments/success?session_id={{CHECKOUT_SESSION_ID}}"
         cancel_url = f"{base_url}/payments/cancel"
         
-        logger.info(f"Creating Stripe checkout session: amount=${amount/100:.2f}, job_id={job_id}, user={current_user['id']}")
+        logger.info(f"Creating Stripe checkout session: amount=${amount/100:.2f}, job_id={job_id}, {user_info}")
         
         # 创建一次性支付的 Checkout Session
         try:
-            session = stripe.checkout.Session.create(
-                mode="payment",  # 一次性支付，不是订阅
-                line_items=[{
+            # 准备 metadata
+            metadata = {
+                "type": "download_purchase",
+                "job_id": job_id,
+            }
+            
+            # 如果是认证用户，添加 user_id；如果是匿名用户，添加 device_fingerprint
+            if current_user:
+                metadata["user_id"] = str(current_user["id"])
+                customer_email = current_user["email"]
+            else:
+                device_fingerprint = get_device_fingerprint(request)
+                metadata["device_fingerprint"] = device_fingerprint
+                customer_email = None  # 匿名用户可能没有邮箱
+            
+            session_params = {
+                "mode": "payment",  # 一次性支付，不是订阅
+                "line_items": [{
                     "price_data": {
                         "currency": "usd",
                         "product_data": {
                             "name": "Exam Download Access",
-                            "description": f"Download access for exam{' ' + job_id if job_id else ''}",
+                            "description": f"Download access for exam {job_id}",
                         },
                         "unit_amount": amount,  # 金额（美分）
                     },
                     "quantity": 1,
                 }],
-                success_url=success_url,
-                cancel_url=cancel_url,
-                customer_email=current_user["email"],
-                metadata={
-                    "user_id": str(current_user["id"]),
-                    "type": "download_purchase",
-                    "job_id": job_id if job_id else "",
-                },
-            )
-            logger.info(f"Created checkout session {session.id} for user {current_user['id']}, amount: ${amount/100:.2f}")
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+                "metadata": metadata,
+            }
+            
+            # 只有认证用户才设置 customer_email
+            if customer_email:
+                session_params["customer_email"] = customer_email
+            
+            session = stripe.checkout.Session.create(**session_params)
+            logger.info(f"Created checkout session {session.id} for {user_info}, amount: ${amount/100:.2f}")
             return {"checkout_url": session.url}
         except stripe.error.StripeError as e:
             logger.error(f"Stripe error creating checkout session: {e}", exc_info=True)
