@@ -338,7 +338,7 @@ def generate_answer_key(exam_data: dict) -> dict:
     prompt = build_answer_prompt(exam_data)
     
     system_content = "You are an expert exam answer key generator. You always output strict JSON, no extra text."
-    
+
     response = client.chat.completions.create(
         model="gpt-5-nano-2025-08-07",
         messages=[
@@ -398,7 +398,7 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
         system_content += f"\n\n用户特殊要求: {special_requests}"
 
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",  # 或你想用的其它模型
+        model="gpt-5-nano-2025-08-07",  # 默认模型
         messages=[
             {
                 "role": "system",
