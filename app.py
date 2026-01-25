@@ -2130,7 +2130,8 @@ async def generate_answer(
     if row["status"] != "done":
         raise HTTPException(status_code=400, detail="Exam generation not completed yet")
     
-    answer_status = row.get("answer_status") or "pending"
+    # sqlite3.Row 对象使用字典式访问，如果字段不存在会返回 None
+    answer_status = row["answer_status"] if row["answer_status"] else "pending"
     
     # 如果答案已经在生成中或已完成，直接返回状态
     if answer_status in ["generating", "done"]:
