@@ -1380,10 +1380,10 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-    shutil.copy2(lecture_path, job_lecture)
+            job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = lecture_path  # 已经是正确位置了
-        
+            shutil.copy2(lecture_path, job_lecture)
         job_lecture_paths.append(job_lecture)
 
     # 统一输出在 job_dir/build 下
