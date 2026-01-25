@@ -1081,6 +1081,11 @@ async def purchase_download(
             job_id = payload.get("job_id")
             if job_id:
                 logger.info(f"Mock payment: unlocking job {job_id} for user {current_user['id']}")
+                # 如果job没有答案，尝试生成答案
+                try:
+                    _generate_answer_for_job_if_missing(job_id, current_user["id"])
+                except Exception as e:
+                    logger.warning(f"Failed to generate answer for job {job_id}: {e}")
             return {"success": True, "unlocked": True}
         
         # 正常模式：创建 Stripe Checkout Session
@@ -1144,7 +1149,107 @@ async def purchase_download(
         raise
     except Exception as e:
         logger.error(f"Unexpected error in purchase_download: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+def _generate_answer_for_job_if_missing(job_id: str, user_id: int) -> bool:
+    """
+    为指定的job生成答案（如果缺失）
+    
+    返回：
+    - True: 成功生成答案或答案已存在
+    - False: 生成失败（但不抛出异常）
+    """
+    try:
+        job_dir = BUILD_ROOT / job_id
+        exam_data_path = job_dir / "exam_data.json"
+        
+        if not exam_data_path.exists():
+            logger.warning(f"exam_data.json not found for job {job_id}, cannot generate answer")
+            return False
+        
+        # 读取exam_data
+        import json
+        with open(exam_data_path, "r", encoding="utf-8") as f:
+            exam_data = json.load(f)
+        
+        # 如果已经有答案，检查答案PDF是否存在
+        if "answers" in exam_data:
+            answer_pdf_path = job_dir / "build" / "answer_filled.pdf"
+            if answer_pdf_path.exists():
+                logger.info(f"Answer already exists for job {job_id}")
+                return True
+            else:
+                # 有答案数据但没有PDF，重新生成PDF
+                logger.info(f"Answer data exists but PDF missing for job {job_id}, regenerating PDF")
+                _render_and_compile_answer_pdf(job_id, job_dir, exam_data_path)
+                return True
+        
+        # 没有答案数据，生成答案
+        logger.info(f"Generating answer for old job {job_id} (user {user_id})")
+        
+        # 导入generate_answer_key函数
+        import sys
+        sys.path.insert(0, str(BASE_DIR))
+        from generate_exam_data import generate_answer_key
+        
+        # 生成答案
+        answer_key = generate_answer_key(exam_data)
+        exam_data["answers"] = answer_key
+        
+        # 保存更新后的exam_data.json
+        with open(exam_data_path, "w", encoding="utf-8") as f:
+            json.dump(exam_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Answer key generated and saved for job {job_id}")
+        
+        # 生成答案PDF
+        _render_and_compile_answer_pdf(job_id, job_dir, exam_data_path)
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to generate answer for job {job_id}: {e}", exc_info=True)
+        return False
+
+
+def _render_and_compile_answer_pdf(job_id: str, job_dir: Path, exam_data_path: Path):
+    """渲染并编译答案PDF"""
+    try:
+        # 渲染答案LaTeX
+        env = os.environ.copy()
+        env["EXAMGEN_OUTPUT_DIR"] = str(job_dir / "build")
+        env["EXAMGEN_EXAM_DATA"] = str(exam_data_path)
+        subprocess.run(
+            [sys.executable, str(BASE_DIR / "render_answer.py")],
+            cwd=str(BASE_DIR),
+            check=True,
+            env=env,
+        )
+        
+        # 编译答案PDF
+        answer_tex_path = job_dir / "build" / "answer_filled.tex"
+        if answer_tex_path.exists():
+            # 检测是否需要中文支持
+            with open(answer_tex_path, "r", encoding="utf-8") as f:
+                answer_tex_content = f.read()
+            has_chinese = any('\u4e00' <= char <= '\u9fff' for char in answer_tex_content)
+            compiler = "xelatex" if has_chinese else "pdflatex"
+            
+            result = subprocess.run(
+                [compiler, "-interaction=nonstopmode", "-output-directory", str(job_dir / "build"), str(answer_tex_path)],
+                capture_output=True,
+                text=True,
+            )
+            
+            answer_pdf_path = job_dir / "build" / "answer_filled.pdf"
+            if answer_pdf_path.exists():
+                logger.info(f"Answer PDF generated successfully for job {job_id}")
+            else:
+                logger.warning(f"Answer PDF was not generated for job {job_id} (exit code: {result.returncode})")
+    except Exception as e:
+        logger.error(f"Failed to render/compile answer PDF for job {job_id}: {e}", exc_info=True)
+        raise
 
 
 # -------------------- 用量 API --------------------
@@ -1263,13 +1368,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         else:
             job_lecture = lecture_path  # 已经是正确位置了
         
@@ -1432,7 +1537,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
                         logger.warning(f"Answer LaTeX file not found: {answer_tex_path}")
                 else:
                     logger.info(f"No answers field in exam_data.json for job {job_id}, skipping answer PDF generation")
-            except Exception as e:
+    except Exception as e:
                 logger.error(f"Failed to generate answer PDF: {e}", exc_info=True)
                 # 答案PDF生成失败不影响主流程
 
@@ -1639,7 +1744,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(lecture_pdf) == 1:
             file_name = lecture_pdf[0].filename or "lecture.pdf"
@@ -1819,7 +1924,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
