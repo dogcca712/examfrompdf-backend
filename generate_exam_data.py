@@ -126,12 +126,11 @@ def extract_text_from_pdf(path: str, max_pages: Optional[int] = None) -> str:
                         for table in tables:
                             table_text = "\n".join([" ".join([str(cell) if cell else "" for cell in row]) for row in table])
                             text += "\n" + table_text
-            texts.append(text)
-    return "\n\n".join(texts)
-    else:
-        # 新逻辑：使用智能采样（但这里不推荐使用，应该用extract_text_from_pdf_with_sampling）
-        # 为了向后兼容，保留旧逻辑
-        return extract_text_from_pdf_with_sampling(path, target_pages=90, seed=None)
+                texts.append(text)
+        return "\n\n".join(texts)
+    # 新逻辑：使用智能采样（但这里不推荐使用，应该用extract_text_from_pdf_with_sampling）
+    # 为了向后兼容，保留旧逻辑
+    return extract_text_from_pdf_with_sampling(path, target_pages=90, seed=None)
 
 
 def build_prompt(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium", special_requests: Optional[str] = None) -> str:
