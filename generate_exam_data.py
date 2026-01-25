@@ -50,9 +50,19 @@ def build_prompt(lecture_text: str, mcq_count: int = 10, short_answer_count: int
     }
     difficulty_instruction = difficulty_descriptions.get(difficulty, difficulty_descriptions["medium"])
     
+    # 构建用户特殊要求的优先级说明
+    special_requests_priority = ""
+    if special_requests:
+        special_requests_priority = f"""
+IMPORTANT: User's special request takes absolute priority over all rules below.
+User's special request: {special_requests}
+All question types (MCQ, SAQ, LQ) must strictly follow this special request, even if it conflicts with default requirements.
+"""
+    
     return f"""
 You are an assistant that creates practice exam papers for university students.
 
+{special_requests_priority if special_requests else ""}
 Below is lecture material text. Your task is to generate a JSON object for a practice exam with the following structure:
 
 {{
@@ -101,17 +111,22 @@ Important global rules:
 Difficulty Level:
 {difficulty_instruction}
 
-{f"用户特殊要求: {special_requests}" if special_requests else ""}
-
 Question-specific requirements:
 - "mcq" must contain EXACTLY {mcq_count} multiple-choice questions.
 - Each MCQ must:
-  - focus on a genuine concept or skill from the lecture (e.g. number systems, data representation, machine instructions, operating systems, file system, etc., depending on the lecture content),
+  {"  - **IMPORTANT**: Follow the user's special request above regarding question type. If the special request conflicts with the default requirements below, prioritize the special request." if special_requests else ""}
+  - {"Otherwise, " if special_requests else ""}focus on a genuine concept or skill from the lecture (e.g. number systems, data representation, machine instructions, operating systems, file system, etc., depending on the lecture content),
   - have exactly 4 options,
   - have only **one clearly correct** option; the other options must be plausible distractors,
   - match the difficulty level specified above.
-- "saq" must contain EXACTLY {short_answer_count} short-answer questions that require the student to write a few sentences or show small calculations/derivations. Match the difficulty level.
-- "lq" must contain EXACTLY {long_question_count} long question(s) that require extended reasoning, explanation, or a multi-step solution. Match the difficulty level.
+- "saq" must contain EXACTLY {short_answer_count} short-answer questions.
+- Each SAQ must:
+  {"  - **IMPORTANT**: Follow the user's special request above regarding question type. If the special request conflicts with the default requirements below, prioritize the special request." if special_requests else ""}
+  - {"Otherwise, " if special_requests else ""}require the student to write a few sentences or show small calculations/derivations. Match the difficulty level.
+- "lq" must contain EXACTLY {long_question_count} long question(s).
+- Each LQ must:
+  {"  - **IMPORTANT**: Follow the user's special request above regarding question type. If the special request conflicts with the default requirements below, prioritize the special request." if special_requests else ""}
+  - {"Otherwise, " if special_requests else ""}require extended reasoning, explanation, or a multi-step solution. Match the difficulty level.
 
 JSON formatting rules:
 - The JSON must be valid and strictly follow the structure above.
