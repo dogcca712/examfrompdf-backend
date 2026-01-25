@@ -126,8 +126,8 @@ def extract_text_from_pdf(path: str, max_pages: Optional[int] = None) -> str:
                         for table in tables:
                             table_text = "\n".join([" ".join([str(cell) if cell else "" for cell in row]) for row in table])
                             text += "\n" + table_text
-                texts.append(text)
-        return "\n\n".join(texts)
+            texts.append(text)
+    return "\n\n".join(texts)
     else:
         # 新逻辑：使用智能采样（但这里不推荐使用，应该用extract_text_from_pdf_with_sampling）
         # 为了向后兼容，保留旧逻辑
@@ -340,7 +340,7 @@ def generate_answer_key(exam_data: dict) -> dict:
     system_content = "You are an expert exam answer key generator. You always output strict JSON, no extra text."
     
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-5-nano-2025-08-07",
         messages=[
             {
                 "role": "system",
@@ -396,7 +396,7 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
     system_content = "You are an expert exam generator for university-level courses. You always output strict JSON, no extra text."
     if special_requests:
         system_content += f"\n\n用户特殊要求: {special_requests}"
-    
+
     response = client.chat.completions.create(
         model="gpt-4.1-mini",  # 或你想用的其它模型
         messages=[
@@ -609,7 +609,7 @@ Here is the previous JSON (may be invalid):
 {raw_json_text}
 """
     response = client.chat.completions.create(
-        model="gpt-4o-mini",  # 使用更可靠的模型
+        model="gpt-5-mini-2025-08-07",  # 备选模型，用于修复任务
         messages=[
             {"role": "system", "content": "You fix JSON to satisfy a strict schema. You MUST fix count errors by adding or removing items. Output only valid JSON."},
             {"role": "user", "content": repair_prompt},
@@ -770,7 +770,7 @@ if __name__ == "__main__":
         # 让模型修复（传递期望的数量以便更准确地修复）
         exam_data = repair_exam_json(raw, errors, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
         raw = json.dumps(exam_data, ensure_ascii=False)
-        
+
         # 重新验证修复后的数据
         errors = validate_exam_data(exam_data, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
 
