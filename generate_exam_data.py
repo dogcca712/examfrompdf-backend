@@ -1,44 +1,83 @@
 import os
 import json
-from typing import Optional
+import random
+from typing import Optional, List, Tuple
 import pdfplumber
 from openai import OpenAI  # 如果你用的是 openai 官方 SDK
 
 client = OpenAI()
 
-def extract_text_from_pdf(path: str, max_pages: Optional[int] = None) -> str:
+def get_pdf_page_count(path: str) -> int:
+    """获取PDF的总页数"""
+    with pdfplumber.open(path) as pdf:
+        return len(pdf.pages)
+
+
+def extract_text_from_pdf_with_sampling(path: str, target_pages: int, seed: Optional[int] = None) -> str:
     """
-    从PDF提取文本，支持智能采样
+    从PDF提取文本，使用分区域+滑动窗口的随机采样策略（方案E）
     
     参数：
     - path: PDF文件路径
-    - max_pages: 最大页数限制（None表示使用智能采样）
+    - target_pages: 目标采样页数（按比例分配后）
+    - seed: 随机种子（用于可复现，如果为None则完全随机）
     
-    智能采样策略：
-    - 如果PDF ≤ 90页：读取所有页
-    - 如果PDF > 90页：读取前30页 + 中间30页 + 后30页（共90页）
+    采样策略：
+    - 如果PDF总页数 <= target_pages：读取所有页
+    - 如果PDF总页数 > target_pages：
+      - 分成前/中/后三个区域
+      - 每个区域按1:1:1比例分配页数
+      - 每个区域内部使用滑动窗口随机选择起始位置，然后连续采样
     """
+    if seed is not None:
+        random.seed(seed)
+    
     texts = []
     with pdfplumber.open(path) as pdf:
         total_pages = len(pdf.pages)
         
-        # 确定要读取的页码列表
-        if max_pages is not None:
-            # 如果指定了max_pages，使用旧逻辑（向后兼容）
-            pages_to_read = list(range(min(total_pages, max_pages)))
-        elif total_pages <= 90:
-            # ≤ 90页：读取所有页
+        # 如果PDF总页数 <= 目标页数，读取所有页
+        if total_pages <= target_pages:
             pages_to_read = list(range(total_pages))
+            print(f"PDF has {total_pages} pages (<= target {target_pages}), reading all pages")
         else:
-            # > 90页：智能采样（前30 + 中30 + 后30）
-            first_30 = list(range(30))  # 前30页（0-29）
-            middle_start = total_pages // 2 - 15  # 中间30页的起始位置
-            middle_30 = list(range(middle_start, middle_start + 30))  # 中间30页
-            last_30 = list(range(total_pages - 30, total_pages))  # 后30页
+            # 分成前/中/后三个区域，每个区域分配 target_pages // 3 页
+            pages_per_region = target_pages // 3
+            remainder = target_pages % 3  # 余数分配给前区域
             
-            # 合并并去重（保持顺序）
-            pages_to_read = sorted(set(first_30 + middle_30 + last_30))
-            print(f"PDF has {total_pages} pages, using smart sampling: pages {pages_to_read[0]}-{pages_to_read[-1]} (total {len(pages_to_read)} pages)")
+            # 定义三个区域的边界
+            region_size = total_pages // 3
+            front_end = region_size
+            middle_start = region_size
+            middle_end = region_size * 2
+            back_start = region_size * 2
+            
+            pages_to_read = []
+            
+            # 前区域：随机起始位置，连续采样
+            front_pages = pages_per_region + remainder
+            if front_end > 0:
+                max_start = max(0, front_end - front_pages)
+                start = random.randint(0, max_start) if max_start > 0 else 0
+                front_selected = list(range(start, min(start + front_pages, front_end)))
+                pages_to_read.extend(front_selected)
+            
+            # 中区域：随机起始位置，连续采样
+            if middle_end > middle_start:
+                max_start = max(middle_start, middle_end - pages_per_region)
+                start = random.randint(middle_start, max_start) if max_start > middle_start else middle_start
+                middle_selected = list(range(start, min(start + pages_per_region, middle_end)))
+                pages_to_read.extend(middle_selected)
+            
+            # 后区域：随机起始位置，连续采样
+            if total_pages > back_start:
+                max_start = max(back_start, total_pages - pages_per_region)
+                start = random.randint(back_start, max_start) if max_start > back_start else back_start
+                back_selected = list(range(start, min(start + pages_per_region, total_pages)))
+                pages_to_read.extend(back_selected)
+            
+            pages_to_read = sorted(set(pages_to_read))  # 去重并排序
+            print(f"PDF has {total_pages} pages, using random sampling (seed={seed}): sampled {len(pages_to_read)} pages from regions [0-{front_end-1}], [{middle_start}-{middle_end-1}], [{back_start}-{total_pages-1}]")
         
         # 提取指定页的文本
         for page_num in pages_to_read:
@@ -61,6 +100,36 @@ def extract_text_from_pdf(path: str, max_pages: Optional[int] = None) -> str:
         print(f"Warning: Extracted text is very short ({len(result)} chars). PDF may be image-based or encrypted.")
     print(f"Extracted text length: {len(result)} chars from {len(pages_to_read)} pages")
     return result
+
+
+def extract_text_from_pdf(path: str, max_pages: Optional[int] = None) -> str:
+    """
+    从PDF提取文本（向后兼容的旧接口）
+    
+    参数：
+    - path: PDF文件路径
+    - max_pages: 最大页数限制（如果指定，使用旧逻辑）
+    """
+    if max_pages is not None:
+        # 旧逻辑：直接读取前max_pages页
+        texts = []
+        with pdfplumber.open(path) as pdf:
+            total_pages = min(len(pdf.pages), max_pages)
+            for i in range(total_pages):
+                page = pdf.pages[i]
+                text = page.extract_text() or ""
+                if len(text.strip()) < 10:
+                    tables = page.extract_tables()
+                    if tables:
+                        for table in tables:
+                            table_text = "\n".join([" ".join([str(cell) if cell else "" for cell in row]) for row in table])
+                            text += "\n" + table_text
+                texts.append(text)
+        return "\n\n".join(texts)
+    else:
+        # 新逻辑：使用智能采样（但这里不推荐使用，应该用extract_text_from_pdf_with_sampling）
+        # 为了向后兼容，保留旧逻辑
+        return extract_text_from_pdf_with_sampling(path, target_pages=90, seed=None)
 
 
 def build_prompt(lecture_text: str, mcq_count: int = 10, short_answer_count: int = 3, long_question_count: int = 1, difficulty: str = "medium", special_requests: Optional[str] = None) -> str:
@@ -406,17 +475,65 @@ if __name__ == "__main__":
     print(f"Output JSON path: {output_path}")
     print(f"Exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
     
-    # 提取所有PDF的文本并合并（使用智能采样）
-    all_texts = []
+    # 第一步：统计所有PDF的总页数
+    MAX_TOTAL_PAGES = 180  # 总共最多采样180页
+    pdf_info = []
+    total_pages_all = 0
+    
+    print(f"\n=== Step 1: Counting pages in all PDFs ===")
     for pdf_path in pdf_paths:
-        print(f"\nProcessing: {pdf_path}")
-        lecture_text = extract_text_from_pdf(pdf_path)  # 使用智能采样，不再限制页数
+        page_count = get_pdf_page_count(pdf_path)
+        pdf_info.append({"path": pdf_path, "total_pages": page_count})
+        total_pages_all += page_count
+        print(f"  {pdf_path}: {page_count} pages")
+    
+    print(f"Total pages across all PDFs: {total_pages_all}")
+    
+    # 第二步：按比例分配180页到各个PDF
+    print(f"\n=== Step 2: Allocating {MAX_TOTAL_PAGES} pages proportionally ===")
+    allocated_pages = []
+    for info in pdf_info:
+        if total_pages_all == 0:
+            allocated = 0
+        else:
+            # 按比例分配，四舍五入
+            allocated = round(MAX_TOTAL_PAGES * info["total_pages"] / total_pages_all)
+        # 确保不超过PDF的实际页数
+        allocated = min(allocated, info["total_pages"])
+        allocated_pages.append(allocated)
+        print(f"  {info['path']}: {info['total_pages']} pages → allocated {allocated} pages")
+    
+    # 确保总和不超过MAX_TOTAL_PAGES（可能因为四舍五入而超出）
+    total_allocated = sum(allocated_pages)
+    if total_allocated > MAX_TOTAL_PAGES:
+        # 按比例缩减
+        scale = MAX_TOTAL_PAGES / total_allocated
+        allocated_pages = [max(1, int(p * scale)) for p in allocated_pages]
+        # 重新确保不超过PDF实际页数
+        for i, info in enumerate(pdf_info):
+            allocated_pages[i] = min(allocated_pages[i], info["total_pages"])
+        print(f"  Adjusted allocation to fit {MAX_TOTAL_PAGES} pages limit")
+    
+    # 第三步：使用随机采样提取文本（使用时间戳作为种子，确保每次生成都不同）
+    print(f"\n=== Step 3: Extracting text with random sampling (Scheme E) ===")
+    all_texts = []
+    # 使用时间戳作为随机种子，确保每次生成都不同
+    import time
+    random_seed = int(time.time() * 1000) % (2**31)  # 使用毫秒级时间戳
+    
+    for idx, pdf_path in enumerate(pdf_paths):
+        target_pages = allocated_pages[idx]
+        print(f"\nProcessing: {pdf_path} (target: {target_pages} pages)")
+        # 每个PDF使用不同的种子（基于基础种子+索引），确保不同PDF的随机性也不同
+        pdf_seed = random_seed + idx * 1000
+        lecture_text = extract_text_from_pdf_with_sampling(pdf_path, target_pages, seed=pdf_seed)
         all_texts.append(lecture_text)
         print(f"Extracted {len(lecture_text)} chars from {pdf_path}")
     
     # 合并所有PDF的文本
     combined_text = "\n\n--- PDF分割线 ---\n\n".join(all_texts)
     print(f"\nTotal extracted text length: {len(combined_text)} chars from {len(pdf_paths)} PDF(s)")
+    print(f"Total pages sampled: {sum(allocated_pages)} pages (max: {MAX_TOTAL_PAGES})")
     
     # 生成exam JSON
     exam_data, raw = generate_exam_json(
