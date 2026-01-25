@@ -434,6 +434,23 @@ def generate_answer_key(exam_data: dict) -> dict:
         if raw.lower().startswith("json"):
             raw = raw[4:].strip()
     
+    # 记录AI返回的原始答案（用于调试）
+    print(f"\n=== AI Answer Response (first 1000 chars) ===")
+    print(raw[:1000])
+    try:
+        temp_data = json.loads(raw)
+        if "mcq" in temp_data:
+            mcq_options = [item.get("correct_option", "?") for item in temp_data["mcq"]]
+            print(f"MCQ correct_options: {mcq_options}")
+            unique_options = set(mcq_options)
+            if len(unique_options) == 1:
+                print(f"WARNING: All MCQ answers are the same: {mcq_options[0]}")
+            else:
+                print(f"MCQ answer distribution: {dict((opt, mcq_options.count(opt)) for opt in unique_options)}")
+    except Exception as e:
+        print(f"Failed to parse answer data for logging: {e}")
+    print(f"=== End AI Answer Response ===\n")
+    
     answer_data = json.loads(raw)
     
     # 验证答案结构
