@@ -1315,11 +1315,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
                             logger.info(f"Answer PDF generated successfully: {answer_pdf_path}")
                         else:
                             logger.warning(f"Answer PDF was not generated (exit code: {result.returncode})")
+                            if result.stderr:
+                                logger.warning(f"LaTeX compilation stderr (last 500 chars): {result.stderr[-500:]}")
                     else:
                         logger.warning(f"Answer LaTeX file not found: {answer_tex_path}")
                 else:
-                    logger.info(f"No answers field in exam_data.json, skipping answer PDF generation")
-    except Exception as e:
+                    logger.info(f"No answers field in exam_data.json for job {job_id}, skipping answer PDF generation")
+            except Exception as e:
                 logger.error(f"Failed to generate answer PDF: {e}", exc_info=True)
                 # 答案PDF生成失败不影响主流程
 
