@@ -1374,15 +1374,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
-            shutil.copy2(lecture_path, job_lecture)
+        if lecture_path != job_lecture:
     shutil.copy2(lecture_path, job_lecture)
-            job_lecture = lecture_path  # 已经是正确位置了
-            job_lecture = lecture_path  # 已经是正确位置了
         
         job_lecture_paths.append(job_lecture)
 
