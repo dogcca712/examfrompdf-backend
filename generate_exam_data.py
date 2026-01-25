@@ -539,19 +539,58 @@ def validate_exam_data(exam_data: dict, *, strict_counts: bool = True, expected_
                 errors.append(f"LQ[{i}] has unexpected keys: {sorted(extra)}")
 
     return errors
-def repair_exam_json(raw_json_text: str, errors: list[str]) -> dict:
+def repair_exam_json(raw_json_text: str, errors: list[str], expected_mcq: int = None, expected_saq: int = None, expected_lq: int = None) -> dict:
     """
     让模型根据错误列表修复 JSON。
     注意：只允许输出 JSON，不允许额外文本。
+    
+    参数：
+    - raw_json_text: 原始JSON文本
+    - errors: 错误列表
+    - expected_mcq: 期望的MCQ数量（用于数量修复）
+    - expected_saq: 期望的SAQ数量
+    - expected_lq: 期望的LQ数量
     """
+    # 解析当前JSON以获取实际数量
+    try:
+        current_data = json.loads(raw_json_text)
+        current_mcq = len(current_data.get("sections", {}).get("mcq", []))
+        current_saq = len(current_data.get("sections", {}).get("saq", []))
+        current_lq = len(current_data.get("sections", {}).get("lq", []))
+    except:
+        current_mcq = current_saq = current_lq = None
+    
+    # 构建数量修复说明
+    count_instructions = []
+    if expected_mcq is not None and current_mcq is not None and current_mcq != expected_mcq:
+        if current_mcq > expected_mcq:
+            count_instructions.append(f"MCQ count: You have {current_mcq} but need {expected_mcq}. REMOVE {current_mcq - expected_mcq} MCQ(s) from the list.")
+        else:
+            count_instructions.append(f"MCQ count: You have {current_mcq} but need {expected_mcq}. ADD {expected_mcq - current_mcq} more MCQ(s) to the list.")
+    
+    if expected_saq is not None and current_saq is not None and current_saq != expected_saq:
+        if current_saq > expected_saq:
+            count_instructions.append(f"SAQ count: You have {current_saq} but need {expected_saq}. REMOVE {current_saq - expected_saq} SAQ(s) from the list.")
+        else:
+            count_instructions.append(f"SAQ count: You have {current_saq} but need {expected_saq}. ADD {expected_saq - current_saq} more SAQ(s) to the list.")
+    
+    if expected_lq is not None and current_lq is not None and current_lq != expected_lq:
+        if current_lq > expected_lq:
+            count_instructions.append(f"LQ count: You have {current_lq} but need {expected_lq}. REMOVE {current_lq - expected_lq} LQ(s) from the list.")
+        else:
+            count_instructions.append(f"LQ count: You have {current_lq} but need {expected_lq}. ADD {expected_lq - current_lq} more LQ(s) to the list.")
+    
+    count_instruction_text = "\n".join(count_instructions) if count_instructions else ""
+    
     repair_prompt = f"""
 You previously generated a JSON for an exam, but it failed validation.
 
 Validation errors:
 {chr(10).join("- " + e for e in errors)}
 
-Your task:
+{("CRITICAL COUNT FIXES NEEDED:\n" + count_instruction_text + "\n") if count_instruction_text else ""}Your task:
 - Output a corrected JSON object that strictly follows the required structure.
+- {"CRITICALLY IMPORTANT: Fix the count errors above by removing or adding questions as specified." if count_instruction_text else ""}
 - Keep the content based on the lecture.
 - Do NOT include any extra keys beyond the allowed ones.
 - Do NOT wrap in markdown fences.
@@ -561,12 +600,12 @@ Here is the previous JSON (may be invalid):
 {raw_json_text}
 """
     response = client.chat.completions.create(
-        model="gpt-5-mini",
+        model="gpt-4o-mini",  # 使用更可靠的模型
         messages=[
-            {"role": "system", "content": "You fix JSON to satisfy a strict schema. Output only valid JSON."},
+            {"role": "system", "content": "You fix JSON to satisfy a strict schema. You MUST fix count errors by adding or removing items. Output only valid JSON."},
             {"role": "user", "content": repair_prompt},
         ],
-        temperature=1,
+        temperature=0.3,  # 降低温度以提高准确性
     )
     raw = response.choices[0].message.content.strip()
     if raw.startswith("```"):
