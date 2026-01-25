@@ -1155,7 +1155,7 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
     # 如果 lecture_path 不在 job_dir 中，才需要复制
     job_lecture = job_dir / "lecture.pdf"
     if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
     else:
         job_lecture = lecture_path  # 已经是正确位置了
 
@@ -1392,8 +1392,8 @@ async def generate_exam(
         logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests[:50] if special_requests else 'None'}...")
         
         # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    if lecture_pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
         
         # 验证参数
         if mcq_count < 0 or mcq_count > 50:
@@ -1442,7 +1442,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         file_name = lecture_pdf.filename or "lecture.pdf"
         created_at = datetime.utcnow().isoformat()
         
@@ -1491,16 +1491,16 @@ async def generate_exam(
         # 使用 BUILD_ROOT 保持一致性
         job_dir = BUILD_ROOT / job_id
         try:
-            job_dir.mkdir(parents=True, exist_ok=True)
+    job_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.error(f"Failed to create job directory: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job directory")
 
         # 保存文件（添加大小检查和错误处理）
-            lecture_path = job_dir / "lecture.pdf"
+    lecture_path = job_dir / "lecture.pdf"
         file_size = 0
         try:
-            with lecture_path.open("wb") as f:
+    with lecture_path.open("wb") as f:
                 # 分块读取，避免内存问题，同时检查大小
                 # 使用 read() 方法（同步，但在异步上下文中可以接受）
                 chunk_size = 8192  # 8KB chunks
@@ -1606,7 +1606,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
