@@ -582,15 +582,24 @@ def repair_exam_json(raw_json_text: str, errors: list[str], expected_mcq: int = 
     
     count_instruction_text = "\n".join(count_instructions) if count_instructions else ""
     
+    # 构建修复提示（避免在f-string表达式中使用反斜杠）
+    count_section = ""
+    if count_instruction_text:
+        count_section = "CRITICAL COUNT FIXES NEEDED:\n" + count_instruction_text + "\n"
+    
+    critical_note = ""
+    if count_instruction_text:
+        critical_note = "CRITICALLY IMPORTANT: Fix the count errors above by removing or adding questions as specified."
+    
     repair_prompt = f"""
 You previously generated a JSON for an exam, but it failed validation.
 
 Validation errors:
 {chr(10).join("- " + e for e in errors)}
 
-{("CRITICAL COUNT FIXES NEEDED:\n" + count_instruction_text + "\n") if count_instruction_text else ""}Your task:
+{count_section}Your task:
 - Output a corrected JSON object that strictly follows the required structure.
-- {"CRITICALLY IMPORTANT: Fix the count errors above by removing or adding questions as specified." if count_instruction_text else ""}
+- {critical_note}
 - Keep the content based on the lecture.
 - Do NOT include any extra keys beyond the allowed ones.
 - Do NOT wrap in markdown fences.
