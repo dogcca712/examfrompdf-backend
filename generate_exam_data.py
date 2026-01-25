@@ -396,6 +396,17 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
     if special_requests:
         system_content += f"\n\n用户特殊要求: {special_requests}"
 
+    # 记录提示词信息（用于调试token使用）
+    prompt_length = len(prompt)
+    system_length = len(system_content)
+    lecture_text_length = len(lecture_text)
+    print(f"\n=== AI Request Info ===")
+    print(f"System prompt length: {system_length} chars")
+    print(f"User prompt length: {prompt_length} chars")
+    print(f"Lecture text length: {lecture_text_length} chars")
+    print(f"Total input (system + user): {system_length + prompt_length} chars")
+    print(f"Estimated input tokens: ~{(system_length + prompt_length) // 4} (rough estimate: 1 token ≈ 4 chars)")
+    
     response = client.chat.completions.create(
         model="gpt-5-nano-2025-08-07",  # 默认模型
         messages=[
@@ -412,6 +423,14 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
     )
 
     raw = response.choices[0].message.content.strip()
+    
+    # 记录AI响应信息
+    response_length = len(raw)
+    print(f"AI response length: {response_length} chars")
+    print(f"Estimated output tokens: ~{response_length // 4}")
+    if hasattr(response, 'usage'):
+        print(f"Actual usage - Input tokens: {response.usage.prompt_tokens}, Output tokens: {response.usage.completion_tokens}, Total: {response.usage.total_tokens}")
+    print(f"=== End AI Request Info ===\n")
     # 有些模型会不听话输出 ```json ...```，我们简单清洗一下
     if raw.startswith("```"):
         raw = raw.strip("`")
