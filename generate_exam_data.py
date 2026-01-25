@@ -827,17 +827,8 @@ if __name__ == "__main__":
         # 重新验证修复后的数据
         errors = validate_exam_data(exam_data, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
 
-    # 生成答案
-    print("\n=== Generating answer key ===")
-    try:
-        answer_key = generate_answer_key(exam_data)
-        exam_data["answers"] = answer_key
-        print("Answer key generated successfully")
-    except Exception as e:
-        print(f"Warning: Failed to generate answer key: {e}")
-        # 如果生成答案失败，仍然保存exam_data（不包含answers字段）
-        if logger:
-            logger.warning(f"Answer key generation failed: {e}")
+    # 不再自动生成答案，等用户付款后再生成（节省token）
+    print("\n=== Skipping answer generation (will be generated after payment) ===")
     
     # 确保输出目录存在
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -293,6 +293,15 @@ def migrate_db():
             except Exception as e:
                 logger.error(f"Failed to add special_requests column: {e}", exc_info=True)
         
+        # 添加 answer_status 列（如果不存在）- 用于跟踪答案生成状态
+        if "answer_status" not in columns:
+            logger.info("Adding answer_status column to jobs table")
+            try:
+                cur.execute("ALTER TABLE jobs ADD COLUMN answer_status TEXT DEFAULT 'pending'")
+                logger.info("Successfully added answer_status column")
+            except Exception as e:
+                logger.error(f"Failed to add answer_status column: {e}", exc_info=True)
+        
         # 检查 user_id 列是否允许 NULL（SQLite不支持直接修改NOT NULL约束，需要重建表）
         cur.execute("PRAGMA table_info(jobs)")
         columns_info = cur.fetchall()
@@ -1081,11 +1090,8 @@ async def purchase_download(
             job_id = payload.get("job_id")
             if job_id:
                 logger.info(f"Mock payment: unlocking job {job_id} for user {current_user['id']}")
-                # 如果job没有答案，尝试生成答案
-                try:
-                    _generate_answer_for_job_if_missing(job_id, current_user["id"])
-                except Exception as e:
-                    logger.warning(f"Failed to generate answer for job {job_id}: {e}")
+                # 不再自动生成答案，等用户付款后通过 /generate_answer/{job_id} 触发
+                pass
             return {"success": True, "unlocked": True}
         
         # 正常模式：创建 Stripe Checkout Session
@@ -1374,7 +1380,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         else:
             job_lecture = lecture_path  # 已经是正确位置了
         
@@ -1488,58 +1494,8 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
                 if warnings:
                     logger.warning(f"LaTeX warnings: {warnings[:5]}")  # 只记录前5个警告
 
-        # 4) 生成答案PDF（如果exam_data.json包含answers字段）
-        answer_pdf_path = None
-        exam_data_path = job_dir / "exam_data.json"
-        if exam_data_path.exists():
-            try:
-                import json
-                with open(exam_data_path, "r", encoding="utf-8") as f:
-                    exam_data = json.load(f)
-                
-                if "answers" in exam_data:
-                    logger.info(f"Generating answer PDF for job {job_id}")
-                    
-                    # 渲染答案LaTeX
-                    env = os.environ.copy()
-                    env["EXAMGEN_OUTPUT_DIR"] = str(job_dir / "build")
-                    env["EXAMGEN_EXAM_DATA"] = str(exam_data_path)
-                    subprocess.run(
-                        [sys.executable, str(BASE_DIR / "render_answer.py")],
-                        cwd=str(BASE_DIR),
-                        check=True,
-                        env=env,
-                    )
-                    
-                    # 编译答案PDF
-                    answer_tex_path = job_dir / "build" / "answer_filled.tex"
-                    if answer_tex_path.exists():
-                        # 检测是否需要中文支持
-                        with open(answer_tex_path, "r", encoding="utf-8") as f:
-                            answer_tex_content = f.read()
-                        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in answer_tex_content)
-                        compiler = "xelatex" if has_chinese else "pdflatex"
-                        
-                        result = subprocess.run(
-                            [compiler, "-interaction=nonstopmode", "-output-directory", str(job_dir / "build"), str(answer_tex_path)],
-                            capture_output=True,
-                            text=True,
-                        )
-                        
-                        answer_pdf_path = job_dir / "build" / "answer_filled.pdf"
-                        if answer_pdf_path.exists():
-                            logger.info(f"Answer PDF generated successfully: {answer_pdf_path}")
-                        else:
-                            logger.warning(f"Answer PDF was not generated (exit code: {result.returncode})")
-                            if result.stderr:
-                                logger.warning(f"LaTeX compilation stderr (last 500 chars): {result.stderr[-500:]}")
-                    else:
-                        logger.warning(f"Answer LaTeX file not found: {answer_tex_path}")
-                else:
-                    logger.info(f"No answers field in exam_data.json for job {job_id}, skipping answer PDF generation")
-            except Exception as e:
-                logger.error(f"Failed to generate answer PDF: {e}", exc_info=True)
-                # 答案PDF生成失败不影响主流程
+        # 4) 不再自动生成答案PDF，等用户付款后再生成（节省token）
+        logger.info(f"Skipping answer generation for job {job_id} (will be generated after payment)")
 
         # 更新数据库（商用级：移除内存状态）
         download_url = f"/download/{job_id}"
@@ -1744,7 +1700,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(lecture_pdf) == 1:
             file_name = lecture_pdf[0].filename or "lecture.pdf"
@@ -1924,7 +1880,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
@@ -2149,3 +2105,193 @@ async def download_answer(
         media_type="application/pdf",
         filename="answer_key.pdf",
     )
+
+
+@app.post("/generate_answer/{job_id}")
+async def generate_answer(
+    request: Request,
+    job_id: str,
+    current_user=Depends(get_current_user),
+):
+    """
+    开始生成答案（付款后调用）
+    触发异步答案生成任务
+    """
+    # 验证job是否存在且属于当前用户
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, user_id, status, answer_status FROM jobs WHERE id = ? AND user_id = ?",
+            (job_id, current_user["id"]),
+        )
+        row = cur.fetchone()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if row["status"] != "done":
+        raise HTTPException(status_code=400, detail="Exam generation not completed yet")
+    
+    answer_status = row.get("answer_status") or "pending"
+    
+    # 如果答案已经在生成中或已完成，直接返回状态
+    if answer_status in ["generating", "done"]:
+        return {
+            "status": answer_status,
+            "message": "Answer generation already started or completed" if answer_status == "generating" else "Answer already generated"
+        }
+    
+    # 更新状态为生成中
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE jobs SET answer_status = ?, updated_at = ? WHERE id = ?",
+            ("generating", datetime.utcnow().isoformat(), job_id),
+        )
+        conn.commit()
+    
+    logger.info(f"[GENERATE_ANSWER] Starting answer generation for job {job_id}, user {current_user['id']}")
+    
+    # 在后台线程中生成答案（异步）
+    def generate_answer_async():
+        try:
+            _generate_answer_for_job(job_id, current_user["id"])
+        except Exception as e:
+            logger.error(f"Failed to generate answer for job {job_id}: {e}", exc_info=True)
+            # 更新状态为失败
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE jobs SET answer_status = ?, updated_at = ? WHERE id = ?",
+                    ("failed", datetime.utcnow().isoformat(), job_id),
+                )
+                conn.commit()
+    
+    # 启动后台线程
+    answer_thread = threading.Thread(target=generate_answer_async, daemon=True)
+    answer_thread.start()
+    
+    return {
+        "status": "generating",
+        "message": "Answer generation started"
+    }
+
+
+@app.get("/answer_status/{job_id}")
+async def answer_status(
+    request: Request,
+    job_id: str,
+    current_user=Depends(get_current_user),
+):
+    """
+    轮询答案生成状态
+    返回: { status: "pending" | "generating" | "done" | "failed", error?: string }
+    """
+    # 验证job是否存在且属于当前用户
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, user_id, answer_status, error FROM jobs WHERE id = ? AND user_id = ?",
+            (job_id, current_user["id"]),
+        )
+        row = cur.fetchone()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    answer_status = row.get("answer_status") or "pending"
+    error = row.get("error")
+    
+    result = {
+        "status": answer_status
+    }
+    
+    if error and answer_status == "failed":
+        result["error"] = error
+    
+    return result
+
+
+def _generate_answer_for_job(job_id: str, user_id: int) -> bool:
+    """
+    为指定的job生成答案（完整流程：生成答案数据 + 生成答案PDF）
+    
+    返回：
+    - True: 成功生成答案
+    - False: 生成失败（会更新数据库状态）
+    """
+    try:
+        job_dir = BUILD_ROOT / job_id
+        exam_data_path = job_dir / "exam_data.json"
+        
+        if not exam_data_path.exists():
+            logger.error(f"exam_data.json not found for job {job_id}, cannot generate answer")
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE jobs SET answer_status = ?, error = ?, updated_at = ? WHERE id = ?",
+                    ("failed", "Exam data not found", datetime.utcnow().isoformat(), job_id),
+                )
+                conn.commit()
+            return False
+        
+        # 读取exam_data
+        import json
+        with open(exam_data_path, "r", encoding="utf-8") as f:
+            exam_data = json.load(f)
+        
+        # 检查是否已有答案数据
+        if "answers" in exam_data:
+            logger.info(f"Answer data already exists for job {job_id}, generating PDF only")
+        else:
+            # 生成答案数据
+            logger.info(f"Generating answer key for job {job_id} (user {user_id})")
+            
+            # 导入generate_answer_key函数
+            import sys
+            sys.path.insert(0, str(BASE_DIR))
+            from generate_exam_data import generate_answer_key
+            
+            # 生成答案
+            answer_key = generate_answer_key(exam_data)
+            exam_data["answers"] = answer_key
+            
+            # 保存更新后的exam_data.json
+            with open(exam_data_path, "w", encoding="utf-8") as f:
+                json.dump(exam_data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"Answer key generated and saved for job {job_id}")
+        
+        # 生成答案PDF
+        logger.info(f"Generating answer PDF for job {job_id}")
+        _render_and_compile_answer_pdf(job_id, job_dir, exam_data_path)
+        
+        # 检查答案PDF是否成功生成
+        answer_pdf_path = job_dir / "build" / "answer_filled.pdf"
+        if not answer_pdf_path.exists():
+            raise RuntimeError("Answer PDF was not generated")
+        
+        # 更新状态为完成
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE jobs SET answer_status = ?, updated_at = ? WHERE id = ?",
+                ("done", datetime.utcnow().isoformat(), job_id),
+            )
+            conn.commit()
+        
+        logger.info(f"Answer generation completed successfully for job {job_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to generate answer for job {job_id}: {e}", exc_info=True)
+        # 更新状态为失败
+        with get_db() as conn:
+            cur = conn.cursor()
+            error_msg = str(e)[:500]  # 限制错误消息长度
+            cur.execute(
+                "UPDATE jobs SET answer_status = ?, error = ?, updated_at = ? WHERE id = ?",
+                ("failed", error_msg, datetime.utcnow().isoformat(), job_id),
+            )
+            conn.commit()
+        return False
