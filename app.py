@@ -1085,8 +1085,16 @@ async def purchase_download(
         
         # 正常模式：创建 Stripe Checkout Session
         if not STRIPE_API_KEY:
-            logger.error("Stripe API key not configured")
-            raise HTTPException(status_code=500, detail="Stripe API key not configured")
+            # 如果没有配置 Stripe 且不在生产环境，自动启用 Mock 模式
+            if not IS_PRODUCTION:
+                logger.warning("Stripe API key not configured, but not in production. Using mock mode as fallback.")
+                job_id = payload.get("job_id")
+                if job_id:
+                    logger.info(f"Mock payment (fallback): unlocking job {job_id} for user {current_user['id']}")
+                return {"success": True, "unlocked": True}
+            else:
+                logger.error("Stripe API key not configured in production environment")
+                raise HTTPException(status_code=500, detail="Stripe API key not configured")
         
         # 获取金额（美分），如果没有提供则使用默认值
         amount = payload.get("amount", 299)  # 默认 $2.99
