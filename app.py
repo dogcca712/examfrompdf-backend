@@ -1478,7 +1478,7 @@ async def generate_exam(
         # 使用 BUILD_ROOT 保持一致性
         job_dir = BUILD_ROOT / job_id
         try:
-    job_dir.mkdir(parents=True, exist_ok=True)
+            job_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.error(f"Failed to create job directory: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job directory")
@@ -1487,7 +1487,7 @@ async def generate_exam(
     lecture_path = job_dir / "lecture.pdf"
         file_size = 0
         try:
-    with lecture_path.open("wb") as f:
+            with lecture_path.open("wb") as f:
                 # 分块读取，避免内存问题，同时检查大小
                 # 使用 read() 方法（同步，但在异步上下文中可以接受）
                 chunk_size = 8192  # 8KB chunks
