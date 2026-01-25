@@ -407,6 +407,26 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
     print(f"Total input (system + user): {system_length + prompt_length} chars")
     print(f"Estimated input tokens: ~{(system_length + prompt_length) // 4} (rough estimate: 1 token ≈ 4 chars)")
     
+    # 保存提示词到文件（如果设置了输出目录）
+    output_dir = os.environ.get("EXAMGEN_OUTPUT_DIR")
+    if output_dir:
+        import time
+        debug_dir = Path(output_dir).parent / "debug"
+        debug_dir.mkdir(exist_ok=True)
+        timestamp = int(time.time())
+        prompt_file = debug_dir / f"prompt_{timestamp}.txt"
+        with open(prompt_file, "w", encoding="utf-8") as f:
+            f.write("=== SYSTEM PROMPT ===\n")
+            f.write(system_content)
+            f.write("\n\n=== USER PROMPT ===\n")
+            f.write(prompt)
+            f.write("\n\n=== PROMPT STATS ===\n")
+            f.write(f"System: {system_length} chars\n")
+            f.write(f"User: {prompt_length} chars\n")
+            f.write(f"Lecture text: {lecture_text_length} chars\n")
+            f.write(f"Total: {system_length + prompt_length} chars\n")
+        print(f"Prompt saved to: {prompt_file}")
+    
     response = client.chat.completions.create(
         model="gpt-5-nano-2025-08-07",  # 默认模型
         messages=[
@@ -431,6 +451,20 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
     if hasattr(response, 'usage'):
         print(f"Actual usage - Input tokens: {response.usage.prompt_tokens}, Output tokens: {response.usage.completion_tokens}, Total: {response.usage.total_tokens}")
     print(f"=== End AI Request Info ===\n")
+    
+    # 保存AI响应到文件
+    if output_dir:
+        response_file = debug_dir / f"response_{timestamp}.txt"
+        with open(response_file, "w", encoding="utf-8") as f:
+            f.write("=== AI RESPONSE ===\n")
+            f.write(raw)
+            f.write("\n\n=== RESPONSE STATS ===\n")
+            f.write(f"Response length: {response_length} chars\n")
+            if hasattr(response, 'usage'):
+                f.write(f"Input tokens: {response.usage.prompt_tokens}\n")
+                f.write(f"Output tokens: {response.usage.completion_tokens}\n")
+                f.write(f"Total tokens: {response.usage.total_tokens}\n")
+        print(f"Response saved to: {response_file}")
     # 有些模型会不听话输出 ```json ...```，我们简单清洗一下
     if raw.startswith("```"):
         raw = raw.strip("`")
