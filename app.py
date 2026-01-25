@@ -1149,7 +1149,7 @@ async def purchase_download(
         raise
     except Exception as e:
         logger.error(f"Unexpected error in purchase_download: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 def _generate_answer_for_job_if_missing(job_id: str, user_id: int) -> bool:
