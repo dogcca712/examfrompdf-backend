@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pathlib import Path
 from datetime import datetime, timedelta, date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import shutil
 import subprocess
 import os
@@ -417,9 +417,13 @@ def worker_thread():
             item = job_queue.get()
             # 兼容新旧格式
             if len(item) == 3:
-                job_id, lecture_path, exam_config = item
+                job_id, lecture_paths, exam_config = item
+                # 兼容旧格式：如果 lecture_paths 是单个 Path 对象，转换为列表
+                if isinstance(lecture_paths, Path):
+                    lecture_paths = [lecture_paths]
             else:
                 job_id, lecture_path = item[:2]
+                lecture_paths = [lecture_path] if isinstance(lecture_path, Path) else lecture_path
                 exam_config = None
             
             # 获取信号量（如果已达到最大并发数，会阻塞等待）
@@ -428,8 +432,8 @@ def worker_thread():
             update_queue_stats("start_processing")
             
             try:
-                logger.info(f"Worker thread: Starting job {job_id}")
-                run_job(job_id, lecture_path, exam_config)
+                logger.info(f"Worker thread: Starting job {job_id} with {len(lecture_paths)} PDF file(s)")
+                run_job(job_id, lecture_paths, exam_config)
                 update_queue_stats("finish_processing")
                 logger.info(f"Worker thread: Completed job {job_id}")
             except Exception as e:
@@ -1131,12 +1135,15 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
     
     return {"jobs": jobs, "total": total}
 
-def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any]] = None):
+def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[str, Any]] = None):
     """
-    后台执行：PDF -> exam_data.json -> render_exam.py -> pdflatex -> PDF
+    后台执行：PDF(s) -> exam_data.json -> render_exam.py -> pdflatex -> PDF
     结果写入数据库（商用级改进：移除内存状态）
     
-    exam_config: 包含 mcq_count, short_answer_count, long_question_count, difficulty
+    参数：
+    - job_id: 任务ID
+    - lecture_paths: PDF文件路径列表（支持多个文件）
+    - exam_config: 包含 mcq_count, short_answer_count, long_question_count, difficulty, special_requests
     """
     # 设置默认值
     if exam_config is None:
@@ -1151,13 +1158,21 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
     job_dir = BUILD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # lecture_path 已经在 job_dir 中了（在 /generate 端点中保存的）
-    # 如果 lecture_path 不在 job_dir 中，才需要复制
-    job_lecture = job_dir / "lecture.pdf"
-    if lecture_path != job_lecture:
-        shutil.copy2(lecture_path, job_lecture)
-    else:
-        job_lecture = lecture_path  # 已经是正确位置了
+    # 处理多个PDF文件：确保所有文件都在job_dir中
+    job_lecture_paths = []
+    for idx, lecture_path in enumerate(lecture_paths):
+        if len(lecture_paths) == 1:
+            job_lecture = job_dir / "lecture.pdf"
+        else:
+            job_lecture = job_dir / f"lecture_{idx}.pdf"
+        
+        # 如果文件不在job_dir中，复制它
+        if lecture_path != job_lecture:
+            shutil.copy2(lecture_path, job_lecture)
+        else:
+            job_lecture = lecture_path  # 已经是正确位置了
+        
+        job_lecture_paths.append(job_lecture)
 
     # 统一输出在 job_dir/build 下
     (job_dir / "build").mkdir(exist_ok=True)
@@ -1184,9 +1199,13 @@ def run_job(job_id: str, lecture_path: Path, exam_config: Optional[Dict[str, Any
         env["EXAMGEN_DIFFICULTY"] = exam_config["difficulty"]
         if exam_config.get("special_requests"):
             env["EXAMGEN_SPECIAL_REQUESTS"] = exam_config["special_requests"]
-        logger.info(f"Passing exam config to generate_exam_data.py: MCQ={exam_config['mcq_count']}, SAQ={exam_config['short_answer_count']}, LQ={exam_config['long_question_count']}, Difficulty={exam_config['difficulty']}, SpecialRequests={exam_config.get('special_requests', 'None')[:50] if exam_config.get('special_requests') else 'None'}...")
+        logger.info(f"Passing exam config to generate_exam_data.py: MCQ={exam_config['mcq_count']}, SAQ={exam_config['short_answer_count']}, LQ={exam_config['long_question_count']}, Difficulty={exam_config['difficulty']}, SpecialRequests={exam_config.get('special_requests', 'None')[:50] if exam_config.get('special_requests') else 'None'}..., PDF files: {len(job_lecture_paths)}")
+        # 构建命令行参数：所有PDF路径 + 输出JSON路径
+        cmd = [sys.executable, str(BASE_DIR / "generate_exam_data.py")]
+        cmd.extend([str(path) for path in job_lecture_paths])  # 添加所有PDF路径
+        cmd.append(str(job_exam_data_json))  # 添加输出JSON路径
         subprocess.run(
-            [sys.executable, str(BASE_DIR / "generate_exam_data.py"), str(job_lecture), str(job_exam_data_json)],
+            cmd,
             cwd=str(BASE_DIR),
             check=True,
             env=env,
@@ -1367,7 +1386,7 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 @app.post("/generate")
 async def generate_exam(
     request: Request,
-    lecture_pdf: UploadFile = File(...),
+    lecture_pdf: List[UploadFile] = File(...),
     mcq_count: int = Form(10),
     short_answer_count: int = Form(3),
     long_question_count: int = Form(1),
@@ -1389,11 +1408,25 @@ async def generate_exam(
     """
     try:
         # 记录接收到的参数（用于调试）
-        logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests[:50] if special_requests else 'None'}...")
+        logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests[:50] if special_requests else 'None'}..., Files={len(lecture_pdf) if lecture_pdf else 0}")
         
-        # 验证文件类型
-        if lecture_pdf.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+        # 调试：打印所有接收到的文件信息
+        if lecture_pdf:
+            for idx, pdf_file in enumerate(lecture_pdf):
+                logger.info(f"Received file {idx + 1}: {pdf_file.filename}, content_type: {pdf_file.content_type}")
+        else:
+            logger.warning("No files received in lecture_pdf parameter")
+        
+        # 验证文件类型和数量
+        if not lecture_pdf or len(lecture_pdf) == 0:
+            raise HTTPException(status_code=400, detail="Please upload at least one PDF file.")
+        
+        if len(lecture_pdf) > 20:
+            raise HTTPException(status_code=400, detail="Maximum 20 PDF files allowed.")
+        
+        for pdf_file in lecture_pdf:
+            if pdf_file.content_type != "application/pdf":
+                raise HTTPException(status_code=400, detail=f"File '{pdf_file.filename}' is not a PDF file.")
         
         # 验证参数
         if mcq_count < 0 or mcq_count > 50:
@@ -1443,10 +1476,14 @@ async def generate_exam(
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
         job_id = str(uuid.uuid4())
-        file_name = lecture_pdf.filename or "lecture.pdf"
+        # 处理多个文件：使用第一个文件名，如果有多个则添加计数
+        if len(lecture_pdf) == 1:
+            file_name = lecture_pdf[0].filename or "lecture.pdf"
+        else:
+            file_name = f"{lecture_pdf[0].filename or 'lecture.pdf'} (+{len(lecture_pdf) - 1} more)"
         created_at = datetime.utcnow().isoformat()
         
-        logger.info(f"[GENERATE] Starting job {job_id} for {user_type} user {user_id}, file: {file_name}")
+        logger.info(f"[GENERATE] Starting job {job_id} for {user_type} user {user_id}, files: {len(lecture_pdf)} PDF(s), first: {lecture_pdf[0].filename}")
         
         # 保存到数据库（商用级：移除内存状态，完全依赖数据库）
         try:
@@ -1496,28 +1533,39 @@ async def generate_exam(
             logger.error(f"Failed to create job directory: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job directory")
 
-        # 保存文件（添加大小检查和错误处理）
-        lecture_path = job_dir / "lecture.pdf"
-        file_size = 0
+        # 保存文件（添加大小检查和错误处理，支持多个文件）
+        lecture_paths = []
+        total_size = 0
         try:
-            with lecture_path.open("wb") as f:
-                # 分块读取，避免内存问题，同时检查大小
-                # 使用 read() 方法（同步，但在异步上下文中可以接受）
-                chunk_size = 8192  # 8KB chunks
-                while True:
-                    chunk = lecture_pdf.file.read(chunk_size)
-                    if not chunk:
-                        break
-                    file_size += len(chunk)
-                    if file_size > MAX_FILE_SIZE:
-                        lecture_path.unlink(missing_ok=True)  # 删除部分文件
-                        raise HTTPException(
-                            status_code=413,
-                            detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024 * 1024):.0f}MB"
-                        )
-                    f.write(chunk)
+            for idx, pdf_file in enumerate(lecture_pdf):
+                # 单个文件：lecture.pdf，多个文件：lecture_0.pdf, lecture_1.pdf, ...
+                if len(lecture_pdf) == 1:
+                    save_path = job_dir / "lecture.pdf"
+                else:
+                    save_path = job_dir / f"lecture_{idx}.pdf"
+                
+                file_size = 0
+                with save_path.open("wb") as f:
+                    # 分块读取，避免内存问题，同时检查大小
+                    chunk_size = 8192  # 8KB chunks
+                    while True:
+                        chunk = pdf_file.file.read(chunk_size)
+                        if not chunk:
+                            break
+                        file_size += len(chunk)
+                        total_size += len(chunk)
+                        if total_size > MAX_FILE_SIZE * len(lecture_pdf):  # 总大小限制：单个文件限制 × 文件数
+                            save_path.unlink(missing_ok=True)  # 删除部分文件
+                            raise HTTPException(
+                                status_code=413,
+                                detail=f"Total file size too large. Maximum total size is {MAX_FILE_SIZE * len(lecture_pdf) / (1024 * 1024):.0f}MB for {len(lecture_pdf)} file(s)"
+                            )
+                        f.write(chunk)
+                
+                lecture_paths.append(save_path)
+                logger.info(f"File {idx + 1}/{len(lecture_pdf)} saved: {pdf_file.filename}, size: {file_size / (1024 * 1024):.2f}MB")
             
-            logger.info(f"File saved: {file_name}, size: {file_size / (1024 * 1024):.2f}MB")
+            logger.info(f"All {len(lecture_pdf)} file(s) saved, total size: {total_size / (1024 * 1024):.2f}MB")
         except HTTPException:
             raise
         except Exception as e:
@@ -1543,7 +1591,7 @@ async def generate_exam(
                 # 不影响主流程，继续执行
 
         # 将任务加入队列（阶段1改进：使用队列和并发控制）
-        # 传递exam配置参数
+        # 传递exam配置参数和文件路径列表
         exam_config = {
             "mcq_count": mcq_count,
             "short_answer_count": short_answer_count,
@@ -1552,7 +1600,8 @@ async def generate_exam(
             "special_requests": special_requests
         }
         try:
-            job_queue.put((job_id, lecture_path, exam_config))
+            # 传递文件路径列表（支持多个PDF）
+            job_queue.put((job_id, lecture_paths, exam_config))
             update_queue_stats("enqueue")
             queue_size = queue_stats["current_queue_size"]
             processing = queue_stats["current_processing"]
@@ -1618,14 +1667,14 @@ async def job_status(
                 row = cur.fetchone()
                 if row:
                     logger.info(f"[STATUS] Found job {job_id} by device_fingerprint, user_id in DB={row.get('user_id')}, current_user_id={current_user['id']}")
-                # 如果通过设备指纹找到，验证user_id是否匹配或为NULL
-                if row:
-                    # SQLite返回的row是字典，可以直接访问
-                    if row.get("user_id") is not None and row.get("user_id") != current_user["id"]:
-                        logger.warning(f"[STATUS] Device fingerprint match but user_id mismatch: DB={row.get('user_id')}, current={current_user['id']}")
-                        row = None  # 设备指纹匹配但user_id不匹配，拒绝
-                    elif row.get("user_id") is None:
-                        logger.info(f"[STATUS] Found anonymous job {job_id} for authenticated user {current_user['id']}, will update user_id")
+                    # 如果通过设备指纹找到，验证user_id是否匹配或为NULL
+                    if row:
+                        # SQLite返回的row是字典，可以直接访问
+                        if row.get("user_id") is not None and row.get("user_id") != current_user["id"]:
+                            logger.warning(f"[STATUS] Device fingerprint match but user_id mismatch: DB={row.get('user_id')}, current={current_user['id']}")
+                            row = None  # 设备指纹匹配但user_id不匹配，拒绝
+                        elif row.get("user_id") is None:
+                            logger.info(f"[STATUS] Found anonymous job {job_id} for authenticated user {current_user['id']}, will update user_id")
         else:
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)

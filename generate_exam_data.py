@@ -6,12 +6,43 @@ from openai import OpenAI  # 如果你用的是 openai 官方 SDK
 
 client = OpenAI()
 
-def extract_text_from_pdf(path: str, max_pages: int = 10) -> str:
+def extract_text_from_pdf(path: str, max_pages: Optional[int] = None) -> str:
+    """
+    从PDF提取文本，支持智能采样
+    
+    参数：
+    - path: PDF文件路径
+    - max_pages: 最大页数限制（None表示使用智能采样）
+    
+    智能采样策略：
+    - 如果PDF ≤ 90页：读取所有页
+    - 如果PDF > 90页：读取前30页 + 中间30页 + 后30页（共90页）
+    """
     texts = []
     with pdfplumber.open(path) as pdf:
-        num_pages = min(len(pdf.pages), max_pages)
-        for i in range(num_pages):
-            page = pdf.pages[i]
+        total_pages = len(pdf.pages)
+        
+        # 确定要读取的页码列表
+        if max_pages is not None:
+            # 如果指定了max_pages，使用旧逻辑（向后兼容）
+            pages_to_read = list(range(min(total_pages, max_pages)))
+        elif total_pages <= 90:
+            # ≤ 90页：读取所有页
+            pages_to_read = list(range(total_pages))
+        else:
+            # > 90页：智能采样（前30 + 中30 + 后30）
+            first_30 = list(range(30))  # 前30页（0-29）
+            middle_start = total_pages // 2 - 15  # 中间30页的起始位置
+            middle_30 = list(range(middle_start, middle_start + 30))  # 中间30页
+            last_30 = list(range(total_pages - 30, total_pages))  # 后30页
+            
+            # 合并并去重（保持顺序）
+            pages_to_read = sorted(set(first_30 + middle_30 + last_30))
+            print(f"PDF has {total_pages} pages, using smart sampling: pages {pages_to_read[0]}-{pages_to_read[-1]} (total {len(pages_to_read)} pages)")
+        
+        # 提取指定页的文本
+        for page_num in pages_to_read:
+            page = pdf.pages[page_num]
             # 尝试提取文本，如果失败则尝试其他方法
             text = page.extract_text() or ""
             # 如果提取的文本为空或很少，尝试使用layout模式
@@ -23,10 +54,12 @@ def extract_text_from_pdf(path: str, max_pages: int = 10) -> str:
                         table_text = "\n".join([" ".join([str(cell) if cell else "" for cell in row]) for row in table])
                         text += "\n" + table_text
             texts.append(text)
+    
     result = "\n\n".join(texts)
     # 如果提取的文本太少，记录警告
     if len(result.strip()) < 50:
         print(f"Warning: Extracted text is very short ({len(result)} chars). PDF may be image-based or encrypted.")
+    print(f"Extracted text length: {len(result)} chars from {len(pages_to_read)} pages")
     return result
 
 
@@ -136,7 +169,7 @@ JSON formatting rules:
 
 Lecture material:
 -----------------
-{lecture_text[:8000]}
+{lecture_text}
 -----------------
 """
 
@@ -344,38 +377,62 @@ if __name__ == "__main__":
     import sys
     from pathlib import Path
     
-    # 支持命令行参数：pdf_path 和可选的输出路径
-    if len(sys.argv) > 1:
-        pdf_path = sys.argv[1]
+    # 支持命令行参数：pdf_path(s) 和可选的输出路径
+    # 格式1: python generate_exam_data.py pdf1.pdf pdf2.pdf ... output.json
+    # 格式2: python generate_exam_data.py pdf1.pdf output.json
+    # 格式3: python generate_exam_data.py pdf1.pdf (使用默认输出路径)
+    
+    if len(sys.argv) < 2:
+        print("Usage: python generate_exam_data.py <pdf1.pdf> [pdf2.pdf ...] [output.json]")
+        sys.exit(1)
+    
+    # 解析参数：最后一个参数如果是.json，则是输出路径；否则所有参数都是PDF路径
+    args = sys.argv[1:]
+    if len(args) > 1 and args[-1].endswith('.json'):
+        pdf_paths = args[:-1]
+        output_path = Path(args[-1])
     else:
-        pdf_path = "lecture.pdf"  # 默认值
+        pdf_paths = args
+        output_path = Path(os.environ.get("EXAMGEN_OUTPUT_JSON", "exam_data.json"))
     
-    # 支持环境变量或命令行参数指定输出路径
-    if len(sys.argv) > 2:
-        output_path = sys.argv[2]
-    else:
-        output_path = os.environ.get("EXAMGEN_OUTPUT_JSON", "exam_data.json")
-    
-    output_path = Path(output_path)
-    
-    # 从环境变量读取exam配置
+    # 从环境变量读取exam配置参数
     mcq_count = int(os.environ.get("EXAMGEN_MCQ_COUNT", "10"))
     short_answer_count = int(os.environ.get("EXAMGEN_SHORT_ANSWER_COUNT", "3"))
     long_question_count = int(os.environ.get("EXAMGEN_LONG_QUESTION_COUNT", "1"))
     difficulty = os.environ.get("EXAMGEN_DIFFICULTY", "medium")
     special_requests = os.environ.get("EXAMGEN_SPECIAL_REQUESTS", None)
-    
-    text = extract_text_from_pdf(pdf_path)
 
-    print(f"Extracted text length: {len(text)}")
-    print(f"PDF path: {pdf_path}")
+    print(f"PDF path(s): {', '.join(pdf_paths)}")
     print(f"Output JSON path: {output_path}")
-    print(f"Exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests or 'None'}")
-
-    exam_data, raw = generate_exam_json(text, mcq_count, short_answer_count, long_question_count, difficulty, special_requests)
-
-    for attempt in range(3):  # 最多 3 次（第一次生成 + 2 次修复）
-        errors = validate_exam_data(exam_data, strict_counts=True, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
+    print(f"Exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
+    
+    # 提取所有PDF的文本并合并（使用智能采样）
+    all_texts = []
+    for pdf_path in pdf_paths:
+        print(f"\nProcessing: {pdf_path}")
+        lecture_text = extract_text_from_pdf(pdf_path)  # 使用智能采样，不再限制页数
+        all_texts.append(lecture_text)
+        print(f"Extracted {len(lecture_text)} chars from {pdf_path}")
+    
+    # 合并所有PDF的文本
+    combined_text = "\n\n--- PDF分割线 ---\n\n".join(all_texts)
+    print(f"\nTotal extracted text length: {len(combined_text)} chars from {len(pdf_paths)} PDF(s)")
+    
+    # 生成exam JSON
+    exam_data, raw = generate_exam_json(
+        combined_text,
+        mcq_count=mcq_count,
+        short_answer_count=short_answer_count,
+        long_question_count=long_question_count,
+        difficulty=difficulty,
+        special_requests=special_requests
+    )
+    
+    # 验证exam数据
+    errors = validate_exam_data(exam_data, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
+    
+    # 如果验证失败，尝试修复（最多3次）
+    for attempt in range(3):
         if not errors:
             break
 
