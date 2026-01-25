@@ -1497,7 +1497,7 @@ async def generate_exam(
             raise HTTPException(status_code=500, detail="Failed to create job directory")
 
         # 保存文件（添加大小检查和错误处理）
-    lecture_path = job_dir / "lecture.pdf"
+        lecture_path = job_dir / "lecture.pdf"
         file_size = 0
         try:
             with lecture_path.open("wb") as f:
