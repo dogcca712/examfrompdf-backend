@@ -1478,7 +1478,7 @@ async def generate_exam(
         # 使用 BUILD_ROOT 保持一致性
         job_dir = BUILD_ROOT / job_id
         try:
-    job_dir.mkdir(parents=True, exist_ok=True)
+            job_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.error(f"Failed to create job directory: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job directory")
