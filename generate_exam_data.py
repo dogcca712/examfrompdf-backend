@@ -411,7 +411,7 @@ def generate_answer_key(exam_data: dict) -> dict:
     system_content = "You are an expert exam answer key generator. You always output strict JSON, no extra text."
 
     response = client.chat.completions.create(
-        model="gpt-5-nano-2025-08-07",
+        model="gpt-4.1-mini-2025-04-14",
         messages=[
             {
                 "role": "system",
@@ -422,7 +422,7 @@ def generate_answer_key(exam_data: dict) -> dict:
                 "content": prompt
             }
         ],
-        # temperature 参数已移除：gpt-5-nano-2025-08-07 只支持默认值 1
+        temperature=0.2,
     )
     
     raw = response.choices[0].message.content.strip()
@@ -500,7 +500,7 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
         print(f"Prompt saved to: {prompt_file}")
 
     response = client.chat.completions.create(
-        model="gpt-5-nano-2025-08-07",  # 默认模型
+        model="gpt-4.1-mini-2025-04-14",  # 默认模型
         messages=[
             {
                 "role": "system",
@@ -511,7 +511,7 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
                 "content": prompt
             }
         ],
-        # temperature 参数已移除：gpt-5-nano-2025-08-07 只支持默认值 1
+        temperature=0.7,
     )
 
     raw = response.choices[0].message.content.strip()
