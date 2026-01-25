@@ -1204,12 +1204,22 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         cmd = [sys.executable, str(BASE_DIR / "generate_exam_data.py")]
         cmd.extend([str(path) for path in job_lecture_paths])  # 添加所有PDF路径
         cmd.append(str(job_exam_data_json))  # 添加输出JSON路径
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             cwd=str(BASE_DIR),
-            check=True,
+            check=False,  # 不自动抛出异常，我们自己处理
             env=env,
+            capture_output=True,
+            text=True,
         )
+        
+        if result.returncode != 0:
+            error_output = result.stderr if result.stderr else result.stdout
+            logger.error(f"generate_exam_data.py failed with exit code {result.returncode}")
+            logger.error(f"Command: {' '.join(cmd)}")
+            if error_output:
+                logger.error(f"Error output (last 2000 chars): {error_output[-2000:]}")
+            raise RuntimeError(f"generate_exam_data.py failed (exit code {result.returncode}): {error_output[-500:] if error_output else 'No error output'}")
 
         # 将 templates 拷一份（避免你以后改模板影响旧 job）
         # 可选：如果你不想拷模板，可以不拷，直接用 BASE_DIR/templates
