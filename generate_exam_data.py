@@ -350,7 +350,7 @@ def generate_answer_key(exam_data: dict) -> dict:
                 "content": prompt
             }
         ],
-        temperature=0.2,
+        # temperature 参数已移除：gpt-5-nano-2025-08-07 只支持默认值 1
     )
     
     raw = response.choices[0].message.content.strip()
@@ -408,7 +408,7 @@ def generate_exam_json(lecture_text: str, mcq_count: int = 10, short_answer_coun
                 "content": prompt
             }
         ],
-        temperature=0.2,
+        # temperature 参数已移除：gpt-5-nano-2025-08-07 只支持默认值 1
     )
 
     raw = response.choices[0].message.content.strip()
@@ -613,7 +613,7 @@ Here is the previous JSON (may be invalid):
             {"role": "system", "content": "You fix JSON to satisfy a strict schema. You MUST fix count errors by adding or removing items. Output only valid JSON."},
             {"role": "user", "content": repair_prompt},
         ],
-        temperature=0.3,  # 降低温度以提高准确性
+        # temperature 参数已移除：gpt-5-mini-2025-08-07 只支持默认值 1
     )
     raw = response.choices[0].message.content.strip()
     if raw.startswith("```"):
