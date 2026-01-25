@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Optional
 import pdfplumber
 from openai import OpenAI  # 如果你用的是 openai 官方 SDK
 
