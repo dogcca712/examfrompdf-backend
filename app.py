@@ -1255,13 +1255,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         else:
             job_lecture = lecture_path  # 已经是正确位置了
         
@@ -1424,7 +1424,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
                         logger.warning(f"Answer LaTeX file not found: {answer_tex_path}")
                 else:
                     logger.info(f"No answers field in exam_data.json for job {job_id}, skipping answer PDF generation")
-            except Exception as e:
+    except Exception as e:
                 logger.error(f"Failed to generate answer PDF: {e}", exc_info=True)
                 # 答案PDF生成失败不影响主流程
 
