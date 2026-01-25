@@ -85,9 +85,9 @@
 %  #3 explanation
 \newcommand{\MCQAnswer}[3]{%
 \ABlockStart{8}
-\noindent\textbf{Q#1.} \textbf{答案：#2}\\
+\noindent\textbf{Q#1.} \textbf{((( answer_label )))：#2}\\
 \begin{explanationbox}
-\textit{解析：} #3
+\textit{((( explanation_label )))：} #3
 \end{explanationbox}
 \vspace{0.4em}
 }
@@ -102,7 +102,7 @@
 \begin{solutionbox}
 #2
 \vspace{0.5em}
-\noindent\textit{评分标准：} #3
+\noindent\textit{((( grading_criteria_label )))：} #3
 \end{solutionbox}
 \vspace{0.6em}
 }
@@ -118,9 +118,9 @@
 \begin{solutionbox}
 #2
 \vspace{0.5em}
-\noindent\textit{评分细则：} #3
+\noindent\textit{((( grading_details_label )))：} #3
 \vspace{0.5em}
-\noindent\textit{常见错误提醒：} #4
+\noindent\textit{((( common_errors_label )))：} #4
 \end{solutionbox}
 \vspace{0.6em}
 }
@@ -131,17 +131,17 @@
 \AnswerTitle{((( exam_title ))) - Answer Key}
 \AnswerMeta{((( course_name ))) }{((( exam_date )))}
 
-\noindent\textbf{Instructions for Graders}
+\noindent\textbf{((( instructions_title )))}
 \begin{itemize}[itemsep=0.2em, topsep=0.2em]
-  \item This document contains detailed answers and grading criteria.
-  \item Use this as a reference when grading student submissions.
-  \item Partial credit should be awarded based on the grading criteria provided.
+  \item ((( instructions_item1 )))
+  \item ((( instructions_item2 )))
+  \item ((( instructions_item3 )))
 \end{itemize}
 
 \vspace{0.8em}
 
 % ---------------- Section A: Multiple Choice Answers ----------------
-\noindent\Large\textbf{Section A: Multiple Choice Answers}\normalsize\\
+\noindent\Large\textbf{((( section_mcq )))}\normalsize\\
 \vspace{0.5em}
 
 % --- MCQ Answers generated from JSON ---
@@ -152,7 +152,7 @@
 \newpage
 
 % ---------------- Section B: Short Answer Questions ----------------
-\noindent\Large\textbf{Section B: Short Answer Questions}\normalsize\\
+\noindent\Large\textbf{((( section_saq )))}\normalsize\\
 \vspace{0.5em}
 
 % --- SAQ Answers generated from JSON ---
@@ -163,7 +163,7 @@
 \newpage
 
 % ---------------- Section C: Long Questions ----------------
-\noindent\Large\textbf{Section C: Long Questions}\normalsize\\
+\noindent\Large\textbf{((( section_lq )))}\normalsize\\
 \vspace{0.5em}
 
 % --- LQ Answers generated from JSON ---

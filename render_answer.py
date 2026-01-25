@@ -66,6 +66,52 @@ def main():
     saq_answers = [sanitize_saq_answer(a) for a in saq_answers_raw]
     lq_answers = [sanitize_lq_answer(a) for a in lq_answers_raw]
 
+    # 4. 检测语言：检查题目内容，判断是中文还是英文
+    all_text = ""
+    for q in exam_data.get("sections", {}).get("mcq", []):
+        all_text += q.get("stem", "") + " ".join(q.get("options", []))
+    for q in exam_data.get("sections", {}).get("saq", []):
+        all_text += q.get("stem", "")
+    for q in exam_data.get("sections", {}).get("lq", []):
+        all_text += q.get("stem", "")
+    
+    # 统计中文字符占比
+    chinese_chars = sum(1 for char in all_text if '\u4e00' <= char <= '\u9fff')
+    total_chars = len(all_text)
+    is_chinese = total_chars > 0 and (chinese_chars / total_chars) > 0.1
+    
+    # 根据语言设置标签文本
+    if is_chinese:
+        labels = {
+            "answer_label": "答案",
+            "explanation_label": "解析",
+            "grading_criteria_label": "评分标准",
+            "grading_details_label": "评分细则",
+            "common_errors_label": "常见错误提醒",
+            "section_mcq": "Section A: 选择题答案",
+            "section_saq": "Section B: 简答题答案",
+            "section_lq": "Section C: 论述题答案",
+            "instructions_title": "评分说明",
+            "instructions_item1": "本文档包含详细答案和评分标准。",
+            "instructions_item2": "请根据评分标准进行评分。",
+            "instructions_item3": "可根据评分标准给予部分分数。",
+        }
+    else:
+        labels = {
+            "answer_label": "Answer",
+            "explanation_label": "Explanation",
+            "grading_criteria_label": "Grading Criteria",
+            "grading_details_label": "Grading Details",
+            "common_errors_label": "Common Errors",
+            "section_mcq": "Section A: Multiple Choice Answers",
+            "section_saq": "Section B: Short Answer Questions",
+            "section_lq": "Section C: Long Questions",
+            "instructions_title": "Instructions for Graders",
+            "instructions_item1": "This document contains detailed answers and grading criteria.",
+            "instructions_item2": "Use this as a reference when grading student submissions.",
+            "instructions_item3": "Partial credit should be awarded based on the grading criteria provided.",
+        }
+
     context = {
         "exam_title": latex_escape(meta["exam_title"]),
         "course_code": latex_escape(meta["course_code"]),
@@ -74,6 +120,7 @@ def main():
         "mcq_answers": mcq_answers,
         "saq_answers": saq_answers,
         "lq_answers": lq_answers,
+        **labels,  # 添加语言标签
     }
 
     # 4. 初始化 Jinja2（关键）
