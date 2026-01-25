@@ -1744,7 +1744,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-    job_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(lecture_pdf) == 1:
             file_name = lecture_pdf[0].filename or "lecture.pdf"
