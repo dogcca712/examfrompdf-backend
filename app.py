@@ -1162,7 +1162,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-    job_lecture = job_dir / "lecture.pdf"
+            job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
