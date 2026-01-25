@@ -222,7 +222,7 @@ Question-specific requirements:
   - {"Otherwise, " if special_requests else ""}focus on a genuine concept or skill from the lecture (e.g. number systems, data representation, machine instructions, operating systems, file system, etc., depending on the lecture content),
   - have exactly 4 options,
   - have only **one clearly correct** option; the other options must be plausible distractors,
-  - **IMPORTANT**: The correct answer should be randomly distributed across options A, B, C, and D. Five consecutive answers cannot be the same.
+  - **IMPORTANT**: The correct answer should be randomly distributed across options A, B, C, and D. Three consecutive answers cannot be the same.
   - match the difficulty level specified above.
 - "saq" must contain EXACTLY {short_answer_count} short-answer questions.
 - Each SAQ must:
