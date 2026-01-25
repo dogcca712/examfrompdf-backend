@@ -1162,13 +1162,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         else:
             job_lecture = lecture_path  # 已经是正确位置了
         
@@ -1319,7 +1319,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
                         logger.warning(f"Answer LaTeX file not found: {answer_tex_path}")
                 else:
                     logger.info(f"No answers field in exam_data.json, skipping answer PDF generation")
-            except Exception as e:
+    except Exception as e:
                 logger.error(f"Failed to generate answer PDF: {e}", exc_info=True)
                 # 答案PDF生成失败不影响主流程
 
@@ -1526,7 +1526,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(lecture_pdf) == 1:
             file_name = lecture_pdf[0].filename or "lecture.pdf"
@@ -1706,7 +1706,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
@@ -1903,8 +1903,28 @@ async def download_answer(
     answer_pdf_path = job_dir / "build" / "answer_filled.pdf"
     
     if not answer_pdf_path.exists():
-        logger.error(f"Answer PDF file not found for job {job_id} at {answer_pdf_path}")
-        raise HTTPException(status_code=404, detail="Answer PDF file not found")
+        # 检查exam_data.json是否存在，以及是否有answers字段
+        exam_data_path = job_dir / "exam_data.json"
+        detail_msg = "Answer PDF file not found"
+        
+        if exam_data_path.exists():
+            try:
+                import json
+                with open(exam_data_path, "r", encoding="utf-8") as f:
+                    exam_data = json.load(f)
+                
+                if "answers" not in exam_data:
+                    detail_msg = "Answer key was not generated for this exam. This may be an older exam created before the answer feature was added."
+                else:
+                    detail_msg = "Answer PDF was not generated. The answer data exists but PDF generation may have failed."
+            except Exception as e:
+                logger.warning(f"Failed to read exam_data.json for job {job_id}: {e}")
+                detail_msg = "Answer PDF file not found. Unable to check exam data."
+        else:
+            detail_msg = "Answer PDF file not found. Exam data file is missing."
+        
+        logger.error(f"Answer PDF file not found for job {job_id} at {answer_pdf_path}. Detail: {detail_msg}")
+        raise HTTPException(status_code=404, detail=detail_msg)
     
     return FileResponse(
         path=str(answer_pdf_path),
