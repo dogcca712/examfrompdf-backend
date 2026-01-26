@@ -2143,12 +2143,24 @@ async def delete_job(
             # 删除数据库记录
             cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             deleted_count = cur.rowcount
+            logger.info(f"[DELETE JOB] DELETE query executed, rowcount={deleted_count} for job {job_id}")
             
             if deleted_count == 0:
                 # 这种情况理论上不应该发生（因为上面已经检查了 row），但为了安全起见
                 logger.warning(f"[DELETE JOB] Job {job_id} was found but deletion returned 0 rows")
                 # 幂等性：返回成功
                 return {"message": "Job already deleted or not found", "job_id": job_id}
+            
+            # 验证删除是否成功（在事务提交前）
+            cur.execute("SELECT COUNT(*) as count FROM jobs WHERE id = ?", (job_id,))
+            verify_row = cur.fetchone()
+            if verify_row["count"] > 0:
+                logger.error(f"[DELETE JOB] CRITICAL: Job {job_id} still exists after DELETE query!")
+            else:
+                logger.info(f"[DELETE JOB] Verified: Job {job_id} successfully deleted from database (before commit)")
+        
+        # 事务会在退出 with 块时自动提交（get_db 上下文管理器）
+        logger.info(f"[DELETE JOB] Database transaction will be committed for job {job_id}")
         
         # 删除文件目录
         job_dir = BUILD_ROOT / job_id
@@ -2169,6 +2181,19 @@ async def delete_job(
         except Exception as e:
             logger.warning(f"[DELETE JOB] Failed to delete transaction records for job {job_id}: {e}", exc_info=True)
             # 交易记录删除失败不影响主流程
+        
+        # 最终验证：再次查询数据库确认记录已删除（事务已提交后）
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) as count FROM jobs WHERE id = ?", (job_id,))
+                final_verify = cur.fetchone()
+                if final_verify["count"] > 0:
+                    logger.error(f"[DELETE JOB] CRITICAL: Job {job_id} still exists in database after commit!")
+                else:
+                    logger.info(f"[DELETE JOB] Final verification: Job {job_id} confirmed deleted from database")
+        except Exception as e:
+            logger.warning(f"[DELETE JOB] Could not verify final deletion: {e}")
         
         logger.info(f"[DELETE JOB] Successfully deleted job {job_id} ({user_info})")
         return {"message": "Job deleted successfully", "job_id": job_id}
