@@ -12,32 +12,28 @@
 \usepackage{fancyhdr}
 \usepackage{setspace}
 \usepackage{microtype}
+\usepackage{tabularx}
 
 % ---- Fixed page setup ----
 \geometry{a4paper, margin=25mm}
 \setstretch{1.15}
 
 % ---- Fix fancyhdr headheight warning ----
-\setlength{\headheight}{14.49998pt}
-\addtolength{\topmargin}{-2.49998pt}
+\setlength{\headheight}{15pt}
 
-% ---- Header / footer ----
+% ---- Header & footer ----
 \pagestyle{fancy}
-\fancyhf{}
-\lhead{\textit{((( course_code )))}}   % e.g., INFO1111
-\rhead{\textit{Practice Exam}}
-\cfoot{\thepage}
+\fancyhf{} % Clear all header and footer fields
 
-% ---- Utility macros ----
-\newcommand{\ExamTitle}[1]{\begin{center}\Large\textbf{#1}\end{center}\vspace{0.5em}}
-\newcommand{\ExamMeta}[2]{%
-\vspace{-0.3em}
-\noindent\textbf{Course:} #1 \hfill \textbf{Date:} #2\\
-\textbf{Name:} \underline{\hspace{7cm}} \hfill \textbf{Student ID:} \underline{\hspace{4cm}}\\
-\vspace{0.8em}
-}
+% 左上角：Course name；右上角：Page X of N；中上：Exam title
+\lhead{((( course_name )))} 
+\chead{((( exam_title )))} 
+\rhead{Page \thepage}
 
-% Keep questions from splitting badly
+% 页脚可以留空或写上考试信息
+\cfoot{}
+
+% ---- Question block: ensure enough space to avoid awkward page breaks ----
 \newcommand{\QBlockStart}[1]{\needspace{#1\baselineskip}}
 
 % ---------------- Question macros ----------------
@@ -49,28 +45,37 @@
 %  #5 option C
 %  #6 option D
 %  #7 marks
+\newcommand{\QHeading}[3]{%
+  \QBlockStart{10}%
+  \noindent
+  \begin{tabularx}{\linewidth}{@{}Xr@{}}%
+    \textbf{Q#1.} #2 & \textbf{[#3~marks]} \\
+  \end{tabularx}\\[-0.2em]%
+}
+
 \newcommand{\MCQ}[7]{%
-\QBlockStart{10}
-\noindent\textbf{Q#1.} #2 \hfill \textbf{[#7~marks]}\\
-\begin{enumerate}[label=(\Alph*), itemsep=0.2em, topsep=0.2em, leftmargin=2.2em]
-  \item #3
-  \item #4
-  \item #5
-  \item #6
-\end{enumerate}
-\vspace{0.6em}
+  \QHeading{#1}{#2}{#7}%
+  \begin{enumerate}[label=(\Alph*), itemsep=0.2em, topsep=0.2em, leftmargin=2.2em]
+    \item #3
+    \item #4
+    \item #5
+    \item #6
+  \end{enumerate}
+  \vspace{0.6em}
 }
 
 \newcommand{\SAQ}[3]{%
-\QBlockStart{10}
-\noindent\textbf{Q#1.} #2 \hfill \textbf{[#3~marks]}\\
-\vspace{8.5em}
+  \QHeading{#1}{#2}{#3}%
+  \vspace{8.5em}
 }
 
 \newcommand{\LQ}[3]{%
-\QBlockStart{14}
-\noindent\textbf{Q#1.} #2 \hfill \textbf{[#3~marks]}\\
-\vspace{12.5em}
+  \QBlockStart{14}%
+  \noindent
+  \begin{tabularx}{\linewidth}{@{}Xr@{}}%
+    \textbf{Q#1.} #2 & \textbf{[#3~marks]} \\
+  \end{tabularx}\\[-0.2em]%
+  \vspace{12.5em}
 }
 
 
@@ -93,9 +98,10 @@
 \noindent\textit{Choose the best answer for each question.}\\
 \vspace{0.5em}
 
-% --- MCQs generated from JSON ---
+% ---- Render MCQs from template variables ----
 ((* for q in mcq_questions *))
-\MCQ{((( loop.index )))}{((( q.stem )))}%
+\MCQ{((( loop.index )))}%
+{((( q.stem )))}%
 {((( q.options[0] )))}%
 {((( q.options[1] )))}%
 {((( q.options[2] )))}%
