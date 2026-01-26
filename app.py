@@ -1527,8 +1527,8 @@ async def purchase_download(
         
         # 构建成功和取消URL
         base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com").rstrip('/')
-        success_url = f"{base_url}?payment=success&job_id={job_id}"
-        cancel_url = f"{base_url}?payment=cancelled"
+        success_url = f"{base_url}/?payment=success&job_id={job_id}"
+        cancel_url = f"{base_url}/?payment=cancelled"
         
         logger.info(f"Creating Stripe checkout session: amount=${amount/100:.2f}, job_id={job_id}, {user_info}")
         
