@@ -31,9 +31,9 @@
 
 % ---- Utility macros ----
 \newcommand{\ExamTitle}[1]{\begin{center}\Large\textbf{#1}\end{center}\vspace{0.5em}}
-\newcommand{\ExamMeta}[2]{%
+\newcommand{\ExamMeta}[1]{%
 \vspace{-0.3em}
-\noindent\textbf{Course:} #1 \hfill \textbf{Date:} #2\\
+\noindent\textbf{Course:} #1\\
 \textbf{Name:} \underline{\hspace{7cm}} \hfill \textbf{Student ID:} \underline{\hspace{4cm}}\\
 \vspace{0.8em}
 }
@@ -85,7 +85,7 @@
 \begin{document}
 
 \ExamTitle{((( exam_title )))}
-\ExamMeta{((( course_name ))) }{((( exam_date )))}
+\ExamMeta{((( course_name ))) }
 
 \noindent\textbf{Instructions}
 \begin{itemize}[itemsep=0.2em, topsep=0.2em]

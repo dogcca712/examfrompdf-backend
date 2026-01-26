@@ -103,15 +103,21 @@ app.add_middleware(
 # 使用上下文管理器确保连接正确关闭
 @contextmanager
 def get_db():
-    """数据库连接上下文管理器，确保连接正确关闭"""
+    """数据库连接上下文管理器，确保连接正确关闭，并监控操作耗时"""
+    start_time = time.time()
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
         conn.commit()
+        elapsed = time.time() - start_time
+        # 如果操作耗时超过100ms，记录警告
+        if elapsed > 0.1:
+            logger.warning(f"Database operation took {elapsed:.3f}s (slow)")
     except Exception as e:
         conn.rollback()
-        logger.error(f"Database error: {e}", exc_info=True)
+        elapsed = time.time() - start_time
+        logger.error(f"Database error after {elapsed:.3f}s: {e}", exc_info=True)
         raise
     finally:
         conn.close()
@@ -302,6 +308,20 @@ def migrate_db():
                 logger.info("Successfully added special_requests column")
             except Exception as e:
                 logger.error(f"Failed to add special_requests column: {e}", exc_info=True)
+        
+        # 重新获取列列表（因为可能已经添加了新列）
+        cur.execute("PRAGMA table_info(jobs)")
+        columns = [row[1] for row in cur.fetchall()]
+        
+        # 添加监控相关的时间戳字段（如果不存在）
+        for col_name in ["started_at", "completed_at"]:
+            if col_name not in columns:
+                logger.info(f"Adding {col_name} column to jobs table for monitoring")
+                try:
+                    cur.execute(f"ALTER TABLE jobs ADD COLUMN {col_name} TEXT")
+                    logger.info(f"Successfully added {col_name} column")
+                except Exception as e:
+                    logger.error(f"Failed to add {col_name} column: {e}", exc_info=True)
         
         # 添加 answer_status 列（如果不存在）- 用于跟踪答案生成状态
         if "answer_status" not in columns:
@@ -1547,6 +1567,159 @@ async def usage_status(current_user=Depends(get_current_user)):
     }
 
 
+# -------------------- 监控统计 API --------------------
+@app.get("/monitoring/stats")
+async def get_monitoring_stats(current_user=Depends(get_current_user)):
+    """
+    获取系统监控统计信息，包括用户等待时长统计
+    返回格式：
+    {
+        "user_stats": {
+            "total_jobs": 10,
+            "completed_jobs": 8,
+            "failed_jobs": 1,
+            "queued_jobs": 1,
+            "avg_wait_time_seconds": 5.2,  # 平均队列等待时间（从创建到开始处理）
+            "avg_processing_time_seconds": 45.3,  # 平均处理时间（从开始到完成）
+            "avg_total_time_seconds": 50.5,  # 平均总时间（从创建到完成）
+            "max_wait_time_seconds": 15.8,
+            "max_processing_time_seconds": 120.5,
+            "max_total_time_seconds": 135.2
+        },
+        "recent_jobs": [
+            {
+                "job_id": "...",
+                "wait_time_seconds": 5.2,
+                "processing_time_seconds": 45.3,
+                "total_time_seconds": 50.5,
+                "status": "done"
+            }
+        ]
+    }
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        
+        # 获取用户的所有job
+        cur.execute(
+            """
+            SELECT id, status, created_at, started_at, completed_at
+            FROM jobs
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 100
+            """,
+            (current_user["id"],)
+        )
+        rows = cur.fetchall()
+        
+        # 统计信息
+        total_jobs = len(rows)
+        completed_jobs = [r for r in rows if r["status"] == "done"]
+        failed_jobs = [r for r in rows if r["status"] == "failed"]
+        queued_jobs = [r for r in rows if r["status"] in ["queued", "running"]]
+        
+        # 计算等待时间、处理时间和总时间
+        wait_times = []
+        processing_times = []
+        total_times = []
+        recent_jobs = []
+        
+        for row in rows[:20]:  # 只统计最近20个job
+            job_id = row["id"]
+            status = row["status"]
+            created_at_str = row["created_at"]
+            started_at_str = row["started_at"]
+            completed_at_str = row["completed_at"]
+            
+            if not created_at_str:
+                continue
+            
+            # 解析时间字符串（兼容有无时区的情况）
+            def parse_datetime(dt_str):
+                if not dt_str:
+                    return None
+                # 移除Z并尝试解析
+                dt_str = dt_str.replace('Z', '')
+                try:
+                    # 尝试解析带时区的格式
+                    return datetime.fromisoformat(dt_str)
+                except ValueError:
+                    # 如果没有时区，假设是UTC
+                    try:
+                        return datetime.fromisoformat(dt_str + '+00:00')
+                    except ValueError:
+                        # 最后尝试基本格式
+                        return datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S.%f')
+            
+            created_at = parse_datetime(created_at_str)
+            if not created_at:
+                continue
+            
+            job_stats = {
+                "job_id": job_id,
+                "status": status,
+                "wait_time_seconds": None,
+                "processing_time_seconds": None,
+                "total_time_seconds": None
+            }
+            
+            # 计算队列等待时间（从创建到开始处理）
+            if started_at_str:
+                started_at = parse_datetime(started_at_str)
+                if started_at:
+                    wait_time = (started_at - created_at).total_seconds()
+                    if wait_time >= 0:  # 确保时间差是合理的
+                        wait_times.append(wait_time)
+                        job_stats["wait_time_seconds"] = round(wait_time, 2)
+            
+            # 计算处理时间（从开始到完成）
+            if started_at_str and completed_at_str:
+                started_at = parse_datetime(started_at_str)
+                completed_at = parse_datetime(completed_at_str)
+                if started_at and completed_at:
+                    processing_time = (completed_at - started_at).total_seconds()
+                    if processing_time >= 0:
+                        processing_times.append(processing_time)
+                        job_stats["processing_time_seconds"] = round(processing_time, 2)
+            
+            # 计算总时间（从创建到完成）
+            if completed_at_str:
+                completed_at = parse_datetime(completed_at_str)
+                if completed_at:
+                    total_time = (completed_at - created_at).total_seconds()
+                    if total_time >= 0:
+                        total_times.append(total_time)
+                        job_stats["total_time_seconds"] = round(total_time, 2)
+            
+            recent_jobs.append(job_stats)
+        
+        # 计算平均值和最大值
+        avg_wait_time = sum(wait_times) / len(wait_times) if wait_times else 0
+        avg_processing_time = sum(processing_times) / len(processing_times) if processing_times else 0
+        avg_total_time = sum(total_times) / len(total_times) if total_times else 0
+        
+        max_wait_time = max(wait_times) if wait_times else 0
+        max_processing_time = max(processing_times) if processing_times else 0
+        max_total_time = max(total_times) if total_times else 0
+        
+        return {
+            "user_stats": {
+                "total_jobs": total_jobs,
+                "completed_jobs": len(completed_jobs),
+                "failed_jobs": len(failed_jobs),
+                "queued_jobs": len(queued_jobs),
+                "avg_wait_time_seconds": round(avg_wait_time, 2),
+                "avg_processing_time_seconds": round(avg_processing_time, 2),
+                "avg_total_time_seconds": round(avg_total_time, 2),
+                "max_wait_time_seconds": round(max_wait_time, 2),
+                "max_processing_time_seconds": round(max_processing_time, 2),
+                "max_total_time_seconds": round(max_total_time, 2)
+            },
+            "recent_jobs": recent_jobs
+        }
+
+
 # -------------------- 任务历史 API --------------------
 @app.get("/jobs")
 async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offset: int = 0):
@@ -1648,16 +1821,19 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     (job_dir / "build").mkdir(exist_ok=True)
 
     try:
+        # 记录开始处理时间
+        started_at = datetime.utcnow().isoformat()
+        
         # 更新数据库状态（商用级：移除内存状态）
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
-                UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?
+                UPDATE jobs SET status = ?, updated_at = ?, started_at = ? WHERE id = ?
                 """,
-                ("running", datetime.utcnow().isoformat(), job_id),
+                ("running", started_at, started_at, job_id),
             )
-        logger.info(f"Job {job_id} started processing")
+        logger.info(f"Job {job_id} started processing at {started_at}")
 
         # 1) 生成 JSON - 直接输出到 job_dir，避免并发冲突
         job_exam_data_json = job_dir / "exam_data.json"
@@ -1762,30 +1938,34 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         # 5) 不再自动生成答案PDF，等用户付款后再生成（节省token）
         logger.info(f"Skipping answer generation for job {job_id} (will be generated after payment)")
 
+        # 记录完成时间
+        completed_at = datetime.utcnow().isoformat()
+        
         # 更新数据库（商用级：移除内存状态）
         download_url = f"/download/{job_id}"
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
-                UPDATE jobs SET status = ?, download_url = ?, updated_at = ? WHERE id = ?
+                UPDATE jobs SET status = ?, download_url = ?, updated_at = ?, completed_at = ? WHERE id = ?
                 """,
-                ("done", download_url, datetime.utcnow().isoformat(), job_id),
+                ("done", download_url, completed_at, completed_at, job_id),
             )
-        logger.info(f"Job {job_id} completed successfully")
+        logger.info(f"Job {job_id} completed successfully at {completed_at}")
 
     except Exception as e:
         error_msg = str(e)
+        completed_at = datetime.utcnow().isoformat()
         # 更新数据库（商用级：移除内存状态）
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
-                UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?
+                UPDATE jobs SET status = ?, error = ?, updated_at = ?, completed_at = ? WHERE id = ?
                 """,
-                ("failed", error_msg, datetime.utcnow().isoformat(), job_id),
+                ("failed", error_msg, completed_at, completed_at, job_id),
             )
-        logger.error(f"Job {job_id} failed: {error_msg}", exc_info=True)
+        logger.error(f"Job {job_id} failed at {completed_at}: {error_msg}", exc_info=True)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2120,6 +2300,8 @@ async def generate_exam(
     except Exception as e:
         logger.error(f"Unexpected error in generate_exam: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
 @app.get("/status/{job_id}")
 async def job_status(
     request: Request,
