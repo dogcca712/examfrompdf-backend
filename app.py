@@ -22,6 +22,7 @@ import queue
 from threading import Semaphore, Lock
 import hashlib
 import io
+import json
 
 # PDF预览图生成依赖
 try:
@@ -322,6 +323,19 @@ def migrate_db():
                     logger.info(f"Successfully added {col_name} column")
                 except Exception as e:
                     logger.error(f"Failed to add {col_name} column: {e}", exc_info=True)
+        
+        # 重新获取列列表（因为可能已经添加了新列）
+        cur.execute("PRAGMA table_info(jobs)")
+        columns = [row[1] for row in cur.fetchall()]
+        
+        # 添加进度信息字段（如果不存在）
+        if "progress_info" not in columns:
+            logger.info("Adding progress_info column to jobs table for progress tracking")
+            try:
+                cur.execute("ALTER TABLE jobs ADD COLUMN progress_info TEXT")
+                logger.info("Successfully added progress_info column")
+            except Exception as e:
+                logger.error(f"Failed to add progress_info column: {e}", exc_info=True)
         
         # 添加 answer_status 列（如果不存在）- 用于跟踪答案生成状态
         if "answer_status" not in columns:
@@ -1837,6 +1851,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
 
         # 1) 生成 JSON - 直接输出到 job_dir，避免并发冲突
         job_exam_data_json = job_dir / "exam_data.json"
+        progress_file = job_dir / "progress.json"
         env = os.environ.copy()
         # 传递exam配置参数到generate_exam_data.py
         env["EXAMGEN_MCQ_COUNT"] = str(exam_config["mcq_count"])
@@ -1850,6 +1865,34 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         cmd = [sys.executable, str(BASE_DIR / "generate_exam_data.py")]
         cmd.extend([str(path) for path in job_lecture_paths])  # 添加所有PDF路径
         cmd.append(str(job_exam_data_json))  # 添加输出JSON路径
+        
+        # 启动子进程并定期读取进度
+        import threading
+        progress_updated = threading.Event()
+        
+        def update_progress_from_file():
+            """定期读取进度文件并更新数据库"""
+            while not progress_updated.is_set():
+                try:
+                    if progress_file.exists():
+                        with open(progress_file, "r", encoding="utf-8") as f:
+                            progress_data = json.load(f)
+                        # 更新数据库
+                        with get_db() as conn:
+                            cur = conn.cursor()
+                            cur.execute(
+                                "UPDATE jobs SET progress_info = ? WHERE id = ?",
+                                (json.dumps(progress_data), job_id)
+                            )
+                except Exception as e:
+                    # 进度更新失败不影响主流程
+                    pass
+                time.sleep(2)  # 每2秒更新一次
+        
+        # 启动进度更新线程
+        progress_thread = threading.Thread(target=update_progress_from_file, daemon=True)
+        progress_thread.start()
+        
         result = subprocess.run(
             cmd,
             cwd=str(BASE_DIR),
@@ -1858,6 +1901,9 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
             capture_output=True,
             text=True,
         )
+        
+        # 停止进度更新线程
+        progress_updated.set()
         
         if result.returncode != 0:
             error_output = result.stderr if result.stderr else result.stdout
@@ -2321,7 +2367,7 @@ async def job_status(
         if current_user:
             # 认证用户：先通过user_id查询
             cur.execute(
-                "SELECT status, error, download_url, user_id, device_fingerprint FROM jobs WHERE id = ? AND user_id = ?",
+                "SELECT status, error, download_url, user_id, device_fingerprint, progress_info FROM jobs WHERE id = ? AND user_id = ?",
                 (job_id, current_user["id"]),
             )
             row = cur.fetchone()
@@ -2333,7 +2379,7 @@ async def job_status(
             if not row:
                 device_fingerprint = get_device_fingerprint(request)
                 cur.execute(
-                    "SELECT status, error, download_url, user_id FROM jobs WHERE id = ? AND device_fingerprint = ?",
+                    "SELECT status, error, download_url, user_id, progress_info FROM jobs WHERE id = ? AND device_fingerprint = ?",
                     (job_id, device_fingerprint),
                 )
                 row = cur.fetchone()
@@ -2351,7 +2397,7 @@ async def job_status(
             # 匿名用户：通过device_fingerprint查询
             device_fingerprint = get_device_fingerprint(request)
             cur.execute(
-                "SELECT status, error, download_url FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
+                "SELECT status, error, download_url, progress_info FROM jobs WHERE id = ? AND device_fingerprint = ? AND user_id IS NULL",
                 (job_id, device_fingerprint),
             )
             row = cur.fetchone()
@@ -2360,15 +2406,23 @@ async def job_status(
         raise HTTPException(status_code=404, detail="job not found")
 
     status = row["status"]
+    result = {"status": status}
+    
+    # 如果有进度信息，添加到响应中
+    if "progress_info" in row and row["progress_info"]:
+        try:
+            progress_data = json.loads(row["progress_info"])
+            result["progress"] = progress_data
+        except (json.JSONDecodeError, TypeError):
+            pass  # 如果解析失败，忽略进度信息
+    
     if status == "done":
-        return {"status": "done"}
+        return result
     elif status == "failed":
-        return {
-            "status": "failed",
-            "error": row["error"] or "Unknown error"
-        }
+        result["error"] = row["error"] or "Unknown error"
+        return result
     else:
-        return {"status": status}
+        return result
 @app.get("/download/{job_id}")
 async def download_exam(
     request: Request,

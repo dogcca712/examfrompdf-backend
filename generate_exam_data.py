@@ -6,6 +6,8 @@ from typing import Optional, List, Tuple
 from pathlib import Path
 import pdfplumber
 from openai import OpenAI  # 如果你用的是 openai 官方 SDK
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 client = OpenAI()
 logger = logging.getLogger(__name__)
@@ -427,7 +429,7 @@ def generate_answer_key(exam_data: dict) -> dict:
         ],
         temperature=0.2,
     )
-    
+
     raw = response.choices[0].message.content.strip()
     # 清洗markdown代码块
     if raw.startswith("```"):
@@ -801,18 +803,55 @@ if __name__ == "__main__":
     print(f"Output JSON path: {output_path}")
     print(f"Exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}")
     
+    # 进度文件路径（与output_path在同一目录）
+    progress_file = output_path.parent / "progress.json"
+    
+    def update_progress(stage: str, current: int = 0, total: int = 0, message: str = ""):
+        """更新进度信息到文件"""
+        try:
+            progress_data = {
+                "stage": stage,  # "counting", "extracting", "generating", "formatting"
+                "current": current,
+                "total": total,
+                "message": message,
+                "timestamp": time.time()
+            }
+            with open(progress_file, "w", encoding="utf-8") as f:
+                json.dump(progress_data, f)
+        except Exception as e:
+            # 进度写入失败不影响主流程
+            pass
+    
     # 第一步：统计所有PDF的总页数
     MAX_TOTAL_PAGES = 180  # 总共最多采样180页
     pdf_info = []
     total_pages_all = 0
     
-    print(f"\n=== Step 1: Counting pages in all PDFs ===")
-    for pdf_path in pdf_paths:
-        page_count = get_pdf_page_count(pdf_path)
-        pdf_info.append({"path": pdf_path, "total_pages": page_count})
-        total_pages_all += page_count
-        print(f"  {pdf_path}: {page_count} pages")
+    print(f"\n=== Step 1: Counting pages in all PDFs (parallel) ===")
+    update_progress("counting", 0, len(pdf_paths), f"Counting pages in {len(pdf_paths)} PDF(s)...")
     
+    # 并行统计页数，提升性能
+    def count_pages_task(pdf_path):
+        try:
+            page_count = get_pdf_page_count(pdf_path)
+            print(f"  {pdf_path}: {page_count} pages")
+            return {"path": pdf_path, "total_pages": page_count}
+        except Exception as e:
+            print(f"  ERROR counting pages in {pdf_path}: {e}")
+            return {"path": pdf_path, "total_pages": 0}
+    
+    # 使用线程池并行处理（最多8个线程）
+    completed_count = 0
+    pdf_info = []
+    with ThreadPoolExecutor(max_workers=min(8, len(pdf_paths))) as executor:
+        future_to_path = {executor.submit(count_pages_task, path): path for path in pdf_paths}
+        for future in as_completed(future_to_path):
+            result = future.result()
+            pdf_info.append(result)
+            completed_count += 1
+            update_progress("counting", completed_count, len(pdf_paths), f"Counted pages in {completed_count}/{len(pdf_paths)} PDF(s)...")
+    
+    total_pages_all = sum(info["total_pages"] for info in pdf_info)
     print(f"Total pages across all PDFs: {total_pages_all}")
     
     # 第二步：按比例分配180页到各个PDF
@@ -840,28 +879,61 @@ if __name__ == "__main__":
             allocated_pages[i] = min(allocated_pages[i], info["total_pages"])
         print(f"  Adjusted allocation to fit {MAX_TOTAL_PAGES} pages limit")
     
-    # 第三步：使用随机采样提取文本（使用时间戳作为种子，确保每次生成都不同）
-    print(f"\n=== Step 3: Extracting text with random sampling (Scheme E) ===")
-    all_texts = []
+    # 第三步：使用随机采样提取文本（并行处理，使用时间戳作为种子，确保每次生成都不同）
+    print(f"\n=== Step 3: Extracting text with random sampling (Scheme E, parallel) ===")
+    update_progress("extracting", 0, len(pdf_paths), f"Extracting text from {len(pdf_paths)} PDF(s)...")
     # 使用时间戳作为随机种子，确保每次生成都不同
-    import time
     random_seed = int(time.time() * 1000) % (2**31)  # 使用毫秒级时间戳
     
-    for idx, pdf_path in enumerate(pdf_paths):
-        target_pages = allocated_pages[idx]
-        print(f"\nProcessing: {pdf_path} (target: {target_pages} pages)")
-        # 每个PDF使用不同的种子（基于基础种子+索引），确保不同PDF的随机性也不同
-        pdf_seed = random_seed + idx * 1000
-        lecture_text = extract_text_from_pdf_with_sampling(pdf_path, target_pages, seed=pdf_seed)
-        all_texts.append(lecture_text)
-        print(f"Extracted {len(lecture_text)} chars from {pdf_path}")
+    # 创建提取任务函数
+    def extract_text_task(args):
+        idx, pdf_path, target_pages = args
+        try:
+            # 每个PDF使用不同的种子（基于基础种子+索引），确保不同PDF的随机性也不同
+            pdf_seed = random_seed + idx * 1000
+            start_time = time.time()
+            lecture_text = extract_text_from_pdf_with_sampling(pdf_path, target_pages, seed=pdf_seed)
+            elapsed = time.time() - start_time
+            print(f"[{idx+1}/{len(pdf_paths)}] ✓ Extracted {len(lecture_text)} chars from {Path(pdf_path).name} ({target_pages} pages, {elapsed:.1f}s)")
+            return (idx, lecture_text)
+        except Exception as e:
+            print(f"[{idx+1}/{len(pdf_paths)}] ✗ ERROR extracting from {Path(pdf_path).name}: {e}")
+            return (idx, "")
     
-    # 合并所有PDF的文本
+    # 准备任务参数
+    extract_tasks = [(idx, pdf_paths[idx], allocated_pages[idx]) for idx in range(len(pdf_paths))]
+    
+    # 并行处理（最多4个线程，避免内存压力过大）
+    all_texts = [None] * len(pdf_paths)  # 预分配列表，保持顺序
+    completed = 0
+    start_time = time.time()
+    
+    with ThreadPoolExecutor(max_workers=min(4, len(pdf_paths))) as executor:
+        # 提交所有任务
+        future_to_task = {executor.submit(extract_text_task, task): task for task in extract_tasks}
+        
+        # 处理完成的任务，显示进度
+        for future in as_completed(future_to_task):
+            idx, lecture_text = future.result()
+            all_texts[idx] = lecture_text
+            completed += 1
+            elapsed = time.time() - start_time
+            avg_time = elapsed / completed
+            remaining = len(pdf_paths) - completed
+            eta = avg_time * remaining
+            print(f"Progress: {completed}/{len(pdf_paths)} PDFs processed (ETA: {eta:.1f}s)")
+            # 更新进度文件
+            update_progress("extracting", completed, len(pdf_paths), f"Extracted text from {completed}/{len(pdf_paths)} PDF(s) (ETA: {eta:.0f}s)")
+    
+    # 合并所有PDF的文本（按原始顺序）
     combined_text = "\n\n--- PDF分割线 ---\n\n".join(all_texts)
-    print(f"\nTotal extracted text length: {len(combined_text)} chars from {len(pdf_paths)} PDF(s)")
-    print(f"Total pages sampled: {sum(allocated_pages)} pages (max: {MAX_TOTAL_PAGES})")
+    total_time = time.time() - start_time
+    print(f"\n✓ Total extracted text length: {len(combined_text)} chars from {len(pdf_paths)} PDF(s)")
+    print(f"✓ Total pages sampled: {sum(allocated_pages)} pages (max: {MAX_TOTAL_PAGES})")
+    print(f"✓ Extraction completed in {total_time:.1f}s (avg: {total_time/len(pdf_paths):.1f}s per PDF)")
     
     # 生成exam JSON
+    update_progress("generating", 0, 1, "Generating exam questions with AI...")
     exam_data, raw = generate_exam_json(
         combined_text,
         mcq_count=mcq_count,
@@ -870,6 +942,7 @@ if __name__ == "__main__":
         difficulty=difficulty,
         special_requests=special_requests
     )
+    update_progress("generating", 1, 1, "Exam questions generated successfully")
     
     # 验证exam数据
     errors = validate_exam_data(exam_data, expected_mcq=mcq_count, expected_saq=short_answer_count, expected_lq=long_question_count)
