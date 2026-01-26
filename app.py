@@ -2409,12 +2409,21 @@ async def job_status(
     result = {"status": status}
     
     # 如果有进度信息，添加到响应中
-    if "progress_info" in row and row["progress_info"]:
-        try:
-            progress_data = json.loads(row["progress_info"])
-            result["progress"] = progress_data
-        except (json.JSONDecodeError, TypeError):
-            pass  # 如果解析失败，忽略进度信息
+    # SQLite Row对象：如果字段为NULL，row["progress_info"]会返回None
+    try:
+        progress_info = row["progress_info"]
+        if progress_info:
+            progress_data = json.loads(progress_info)
+            # 确保返回的格式符合前端要求：只包含必要的字段
+            result["progress"] = {
+                "stage": progress_data.get("stage", ""),
+                "current": progress_data.get("current", 0),
+                "total": progress_data.get("total", 0),
+                "message": progress_data.get("message", "")
+            }
+    except (KeyError, json.JSONDecodeError, TypeError, AttributeError):
+        # 如果字段不存在、为NULL或解析失败，忽略进度信息
+        pass
     
     if status == "done":
         return result
