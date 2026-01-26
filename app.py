@@ -396,6 +396,36 @@ def migrate_db():
             except Exception as e:
                 logger.error(f"Failed to add unlocked_at column: {e}", exc_info=True)
         
+        # 检查并创建 transactions 表（如果不存在）
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'")
+        if not cur.fetchone():
+            logger.info("Creating transactions table")
+            try:
+                cur.execute(
+                    """
+                    CREATE TABLE transactions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT NOT NULL,
+                        user_id INTEGER,
+                        stripe_session_id TEXT UNIQUE NOT NULL,
+                        amount INTEGER NOT NULL,
+                        currency TEXT NOT NULL DEFAULT 'usd',
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        FOREIGN KEY(job_id) REFERENCES jobs(id),
+                        FOREIGN KEY(user_id) REFERENCES users(id)
+                    );
+                    """
+                )
+                # 创建索引
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_transactions_job_id ON transactions(job_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_transactions_session_id ON transactions(stripe_session_id)")
+                logger.info("Successfully created transactions table")
+            except Exception as e:
+                logger.error(f"Failed to create transactions table: {e}", exc_info=True)
+        
         # 检查 user_id 列是否允许 NULL（SQLite不支持直接修改NOT NULL约束，需要重建表）
         cur.execute("PRAGMA table_info(jobs)")
         columns_info = cur.fetchall()
