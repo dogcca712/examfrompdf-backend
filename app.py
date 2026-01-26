@@ -2081,6 +2081,93 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
     
     return {"jobs": jobs, "total": total}
 
+
+@app.delete("/jobs/{job_id}")
+async def delete_job(
+    job_id: str,
+    request: Request,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """
+    删除指定的 job（支持匿名用户和认证用户）
+    - 验证 job 属于当前用户/设备
+    - 删除数据库记录
+    - 删除对应的文件目录
+    """
+    try:
+        logger.info(f"[DELETE JOB] Request to delete job {job_id}")
+        
+        # 验证 job 是否存在且属于当前用户/设备
+        with get_db() as conn:
+            cur = conn.cursor()
+            if current_user:
+                # 认证用户：验证 job 属于该用户
+                cur.execute(
+                    "SELECT id, user_id, device_fingerprint, file_name FROM jobs WHERE id = ?",
+                    (job_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Job not found")
+                # 如果 job 有 user_id，必须匹配
+                if row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                    raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+                user_info = f"user_id={current_user['id']}"
+            else:
+                # 匿名用户：验证 job 属于该设备
+                device_fingerprint = get_device_fingerprint(request)
+                cur.execute(
+                    "SELECT id, user_id, device_fingerprint, file_name FROM jobs WHERE id = ?",
+                    (job_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Job not found")
+                # 如果 job 有 user_id，匿名用户不能删除
+                if row["user_id"] is not None:
+                    raise HTTPException(status_code=403, detail="Access denied: this job belongs to a registered user. Please log in.")
+                # 验证设备指纹
+                if row["device_fingerprint"] != device_fingerprint:
+                    raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
+                user_info = "anonymous"
+            
+            # 删除数据库记录
+            cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            deleted_count = cur.rowcount
+            
+            if deleted_count == 0:
+                raise HTTPException(status_code=404, detail="Job not found")
+        
+        # 删除文件目录
+        job_dir = BUILD_ROOT / job_id
+        if job_dir.exists():
+            try:
+                shutil.rmtree(job_dir)
+                logger.info(f"[DELETE JOB] Deleted files for job {job_id} ({user_info})")
+            except Exception as e:
+                logger.warning(f"[DELETE JOB] Failed to delete files for job {job_id}: {e}", exc_info=True)
+                # 文件删除失败不影响数据库删除，继续执行
+        
+        # 删除关联的交易记录（如果有）
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM transactions WHERE job_id = ?", (job_id,))
+                logger.info(f"[DELETE JOB] Deleted transaction records for job {job_id}")
+        except Exception as e:
+            logger.warning(f"[DELETE JOB] Failed to delete transaction records for job {job_id}: {e}", exc_info=True)
+            # 交易记录删除失败不影响主流程
+        
+        logger.info(f"[DELETE JOB] Successfully deleted job {job_id} ({user_info})")
+        return {"message": "Job deleted successfully", "job_id": job_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[DELETE JOB] Unexpected error deleting job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete job: {str(e)}")
+
+
 def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[str, Any]] = None):
     """
     后台执行：PDF(s) -> exam_data.json -> render_exam.py -> pdflatex -> PDF
