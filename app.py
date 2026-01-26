@@ -2065,6 +2065,11 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
         )
         rows = cur.fetchall()
         logger.info(f"[GET JOBS] Returning {len(rows)} jobs for user_id={current_user['id']}")
+        
+        # 记录返回的job IDs用于调试
+        if rows:
+            job_ids = [row["id"] for row in rows]
+            logger.info(f"[GET JOBS] Job IDs being returned: {job_ids[:5]}{'...' if len(job_ids) > 5 else ''}")
     
     jobs = []
     for row in rows:
@@ -2081,7 +2086,9 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
             job["error"] = row["error"]
         
         jobs.append(job)
+        logger.debug(f"[GET JOBS] Added job {row['id']} ({row['file_name']}) to response")
     
+    logger.info(f"[GET JOBS] Final response: {len(jobs)} jobs, total={total}")
     return {"jobs": jobs, "total": total}
 
 
@@ -2235,13 +2242,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         
         job_lecture_paths.append(job_lecture)
 
@@ -2391,7 +2398,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         # 4) 生成预览图（第一页，带水印）
         try:
             _generate_preview_image(job_id, pdf_path, job_dir)
-        except Exception as e:
+    except Exception as e:
             logger.warning(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
             # 预览图生成失败不影响主流程，继续执行
 
@@ -2705,7 +2712,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(pdf_files) == 1:
             file_name = pdf_files[0].name
@@ -2732,6 +2739,14 @@ async def generate_exam(
                         (job_id, user_id, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty, special_requests),
                     )
                     logger.info(f"[GENERATE] Job {job_id} saved to DB: user_id={user_id}, device_fp={device_fingerprint[:16]}...")
+                    
+                    # 验证job是否正确保存
+                    cur.execute("SELECT id, user_id, file_name FROM jobs WHERE id = ?", (job_id,))
+                    verify_row = cur.fetchone()
+                    if verify_row:
+                        logger.info(f"[GENERATE] Verified: Job {job_id} exists in DB with user_id={verify_row['user_id']}, file_name={verify_row['file_name']}")
+                    else:
+                        logger.error(f"[GENERATE] CRITICAL: Job {job_id} was not found in DB immediately after INSERT!")
                 else:
                     # 匿名用户：记录设备指纹，user_id为NULL
                     cur.execute(
@@ -2891,7 +2906,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
