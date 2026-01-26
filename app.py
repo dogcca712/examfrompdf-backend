@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Req
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from pathlib import Path
 from datetime import datetime, timedelta, date
@@ -89,6 +90,29 @@ ALLOWED_ORIGINS = [
 ALLOWED_ORIGIN_REGEX = r"https://.*\.lovable\.app"
 
 app = FastAPI(title="ExamFromPDF")
+
+# 添加请求验证错误处理器，提供更详细的错误信息
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """捕获422验证错误，记录详细信息用于调试"""
+    try:
+        body = await request.body()
+        body_str = body.decode('utf-8', errors='ignore')[:500]  # 限制长度
+    except:
+        body_str = "Unable to read body"
+    
+    logger.error(f"[VALIDATION ERROR] Path: {request.url.path}, Method: {request.method}")
+    logger.error(f"[VALIDATION ERROR] Content-Type: {request.headers.get('content-type', 'N/A')}")
+    logger.error(f"[VALIDATION ERROR] Errors: {exc.errors()}")
+    logger.error(f"[VALIDATION ERROR] Body preview: {body_str}")
+    
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": exc.errors(),
+            "message": "Request validation failed. Please check that you're sending multipart/form-data with 'file' and 'session_id' fields."
+        }
+    )
 
 # CORS
 app.add_middleware(
@@ -2140,7 +2164,13 @@ async def upload_file(
     """
     上传单个PDF文件到指定session
     返回：{ "success": true, "file_name": "...", "session_id": "...", "file_count": N }
+    
+    请求格式：multipart/form-data
+    - file: PDF文件
+    - session_id: UUID格式的session ID
     """
+    logger.info(f"[UPLOAD] Received upload request: filename={file.filename}, content_type={file.content_type}, session_id={session_id}")
+    
     # 验证文件类型
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="File must be a PDF")
