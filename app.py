@@ -2098,6 +2098,9 @@ async def delete_job(
         logger.info(f"[DELETE JOB] Request to delete job {job_id}")
         
         # 验证 job 是否存在且属于当前用户/设备
+        job_exists = False
+        user_info = ""
+        
         with get_db() as conn:
             cur = conn.cursor()
             if current_user:
@@ -2108,10 +2111,13 @@ async def delete_job(
                 )
                 row = cur.fetchone()
                 if not row:
-                    raise HTTPException(status_code=404, detail="Job not found")
+                    # Job 不存在（可能已经被删除）- 幂等性：返回成功
+                    logger.info(f"[DELETE JOB] Job {job_id} not found, already deleted (user_id={current_user['id']})")
+                    return {"message": "Job already deleted or not found", "job_id": job_id}
                 # 如果 job 有 user_id，必须匹配
                 if row["user_id"] is not None and row["user_id"] != current_user["id"]:
                     raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+                job_exists = True
                 user_info = f"user_id={current_user['id']}"
             else:
                 # 匿名用户：验证 job 属于该设备
@@ -2122,13 +2128,16 @@ async def delete_job(
                 )
                 row = cur.fetchone()
                 if not row:
-                    raise HTTPException(status_code=404, detail="Job not found")
+                    # Job 不存在（可能已经被删除）- 幂等性：返回成功
+                    logger.info(f"[DELETE JOB] Job {job_id} not found, already deleted (anonymous)")
+                    return {"message": "Job already deleted or not found", "job_id": job_id}
                 # 如果 job 有 user_id，匿名用户不能删除
                 if row["user_id"] is not None:
                     raise HTTPException(status_code=403, detail="Access denied: this job belongs to a registered user. Please log in.")
                 # 验证设备指纹
                 if row["device_fingerprint"] != device_fingerprint:
                     raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
+                job_exists = True
                 user_info = "anonymous"
             
             # 删除数据库记录
@@ -2136,7 +2145,10 @@ async def delete_job(
             deleted_count = cur.rowcount
             
             if deleted_count == 0:
-                raise HTTPException(status_code=404, detail="Job not found")
+                # 这种情况理论上不应该发生（因为上面已经检查了 row），但为了安全起见
+                logger.warning(f"[DELETE JOB] Job {job_id} was found but deletion returned 0 rows")
+                # 幂等性：返回成功
+                return {"message": "Job already deleted or not found", "job_id": job_id}
         
         # 删除文件目录
         job_dir = BUILD_ROOT / job_id
@@ -2195,13 +2207,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         
         job_lecture_paths.append(job_lecture)
 
@@ -2351,7 +2363,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         # 4) 生成预览图（第一页，带水印）
         try:
             _generate_preview_image(job_id, pdf_path, job_dir)
-        except Exception as e:
+    except Exception as e:
             logger.warning(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
             # 预览图生成失败不影响主流程，继续执行
 
@@ -2665,7 +2677,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(pdf_files) == 1:
             file_name = pdf_files[0].name
@@ -2851,7 +2863,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
