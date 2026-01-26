@@ -2207,13 +2207,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         
         job_lecture_paths.append(job_lecture)
 
@@ -2363,7 +2363,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         # 4) 生成预览图（第一页，带水印）
         try:
             _generate_preview_image(job_id, pdf_path, job_dir)
-        except Exception as e:
+    except Exception as e:
             logger.warning(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
             # 预览图生成失败不影响主流程，继续执行
 
@@ -2677,7 +2677,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(pdf_files) == 1:
             file_name = pdf_files[0].name
