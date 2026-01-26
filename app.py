@@ -2346,10 +2346,24 @@ async def preview_exam(
     # 从文件系统读取预览图
     job_dir = BUILD_ROOT / job_id
     preview_path = job_dir / "build" / "preview.png"
+    pdf_path = job_dir / "build" / "exam_filled.pdf"
     
+    # 如果预览图不存在，尝试从PDF生成
     if not preview_path.exists():
-        logger.warning(f"Preview image not found for job {job_id} at {preview_path}")
-        raise HTTPException(status_code=404, detail="Preview image not found")
+        if pdf_path.exists():
+            logger.info(f"Preview image not found for job {job_id}, attempting to generate from PDF")
+            try:
+                _generate_preview_image(job_id, pdf_path, job_dir)
+                # 重新检查预览图是否生成成功
+                if not preview_path.exists():
+                    logger.error(f"Failed to generate preview image for job {job_id}")
+                    raise HTTPException(status_code=500, detail="Failed to generate preview image")
+            except Exception as e:
+                logger.error(f"Error generating preview image for job {job_id}: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Failed to generate preview image: {str(e)}")
+        else:
+            logger.warning(f"Preview image and PDF not found for job {job_id}")
+            raise HTTPException(status_code=404, detail="Preview image not found and PDF not available")
     
     return FileResponse(
         path=str(preview_path),
