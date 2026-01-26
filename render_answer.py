@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 import os
@@ -9,21 +10,55 @@ OUTPUT_DIR = Path(os.environ.get("EXAMGEN_OUTPUT_DIR", str(BASE_DIR / "build")))
 EXAM_DATA_PATH = Path(os.environ.get("EXAMGEN_EXAM_DATA", str(BASE_DIR / "exam_data.json")))
 
 def latex_escape(s: str) -> str:
+    """
+    转义LaTeX特殊字符，但保留数学模式（$...$ 和 $$...$$）不变
+    """
     if s is None:
         return ""
     s = str(s)
-
+    
+    # 使用占位符保护数学模式（使用不包含特殊字符的占位符）
+    math_placeholders = []
+    placeholder_counter = 0
+    
+    # 匹配 $$...$$ (显示数学)
+    def replace_display_math(match):
+        nonlocal placeholder_counter
+        placeholder = f"@@MATHDISPLAY{placeholder_counter}@@"
+        placeholder_counter += 1
+        math_placeholders.append(match.group(0))  # 保存原始数学内容
+        return placeholder
+    
+    # 匹配 $...$ (行内数学)
+    def replace_inline_math(match):
+        nonlocal placeholder_counter
+        placeholder = f"@@MATHINLINE{placeholder_counter}@@"
+        placeholder_counter += 1
+        math_placeholders.append(match.group(0))  # 保存原始数学内容
+        return placeholder
+    
+    # 先处理显示数学 $$...$$（避免与行内数学冲突）
+    s = re.sub(r'\$\$.*?\$\$', replace_display_math, s, flags=re.DOTALL)
+    # 再处理行内数学 $...$（但不能是 $$）
+    s = re.sub(r'(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)', replace_inline_math, s)
+    
+    # 转义非数学模式中的特殊字符
     # Important: backslash first
     s = s.replace("\\", r"\textbackslash{}")
     s = s.replace("&", r"\&")
     s = s.replace("%", r"\%")
-    s = s.replace("$", r"\$")
     s = s.replace("#", r"\#")
     s = s.replace("_", r"\_")
     s = s.replace("{", r"\{")
     s = s.replace("}", r"\}")
     s = s.replace("~", r"\textasciitilde{}")
     s = s.replace("^", r"\textasciicircum{}")
+    
+    # 恢复数学模式（不转义）
+    for i, math_content in enumerate(math_placeholders):
+        s = s.replace(f"@@MATHDISPLAY{i}@@", math_content)
+        s = s.replace(f"@@MATHINLINE{i}@@", math_content)
+    
     return s
 
 def sanitize_mcq_answer(a):
