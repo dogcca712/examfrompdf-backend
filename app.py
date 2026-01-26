@@ -2153,23 +2153,47 @@ async def download_answer(
 async def generate_answer(
     request: Request,
     job_id: str,
-    current_user=Depends(get_current_user),
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional),
 ):
     """
     开始生成答案（付款后调用）
-    触发异步答案生成任务
+    触发异步答案生成任务（支持匿名用户和认证用户）
     """
-    # 验证job是否存在且属于当前用户
+    # 验证job是否存在且属于当前用户/设备
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id, user_id, status, answer_status FROM jobs WHERE id = ? AND user_id = ?",
-            (job_id, current_user["id"]),
-        )
-        row = cur.fetchone()
-    
-    if not row:
-        raise HTTPException(status_code=404, detail="Job not found")
+        if current_user:
+            # 认证用户：验证 job 属于该用户
+            cur.execute(
+                "SELECT id, user_id, status, answer_status FROM jobs WHERE id = ?",
+                (job_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Job not found")
+            # 如果 job 有 user_id，必须匹配
+            if row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+            user_id = current_user["id"]
+            user_info = f"user_id={user_id}"
+        else:
+            # 匿名用户：验证 job 属于该设备
+            device_fingerprint = get_device_fingerprint(request)
+            cur.execute(
+                "SELECT id, user_id, status, answer_status, device_fingerprint FROM jobs WHERE id = ?",
+                (job_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Job not found")
+            # 如果 job 有 user_id，匿名用户不能访问
+            if row["user_id"] is not None:
+                raise HTTPException(status_code=403, detail="Access denied: this job belongs to a registered user. Please log in.")
+            # 验证设备指纹
+            if row["device_fingerprint"] != device_fingerprint:
+                raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
+            user_id = None
+            user_info = "anonymous"
     
     if row["status"] != "done":
         raise HTTPException(status_code=400, detail="Exam generation not completed yet")
@@ -2193,12 +2217,12 @@ async def generate_answer(
         )
         conn.commit()
     
-    logger.info(f"[GENERATE_ANSWER] Starting answer generation for job {job_id}, user {current_user['id']}")
+    logger.info(f"[GENERATE_ANSWER] Starting answer generation for job {job_id}, {user_info}")
     
     # 在后台线程中生成答案（异步）
     def generate_answer_async():
         try:
-            _generate_answer_for_job(job_id, current_user["id"])
+            _generate_answer_for_job(job_id, user_id)
         except Exception as e:
             logger.error(f"Failed to generate answer for job {job_id}: {e}", exc_info=True)
             # 更新状态为失败
@@ -2224,23 +2248,43 @@ async def generate_answer(
 async def answer_status(
     request: Request,
     job_id: str,
-    current_user=Depends(get_current_user),
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional),
 ):
     """
-    轮询答案生成状态
+    轮询答案生成状态（支持匿名用户和认证用户）
     返回: { status: "pending" | "generating" | "done" | "failed", error?: string }
     """
-    # 验证job是否存在且属于当前用户
+    # 验证job是否存在且属于当前用户/设备
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id, user_id, answer_status, error FROM jobs WHERE id = ? AND user_id = ?",
-            (job_id, current_user["id"]),
-        )
-        row = cur.fetchone()
-    
-    if not row:
-        raise HTTPException(status_code=404, detail="Job not found")
+        if current_user:
+            # 认证用户：验证 job 属于该用户
+            cur.execute(
+                "SELECT id, user_id, answer_status, error FROM jobs WHERE id = ?",
+                (job_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Job not found")
+            # 如果 job 有 user_id，必须匹配
+            if row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+        else:
+            # 匿名用户：验证 job 属于该设备
+            device_fingerprint = get_device_fingerprint(request)
+            cur.execute(
+                "SELECT id, user_id, answer_status, error, device_fingerprint FROM jobs WHERE id = ?",
+                (job_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Job not found")
+            # 如果 job 有 user_id，匿名用户不能访问
+            if row["user_id"] is not None:
+                raise HTTPException(status_code=403, detail="Access denied: this job belongs to a registered user. Please log in.")
+            # 验证设备指纹
+            if row["device_fingerprint"] != device_fingerprint:
+                raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
     
     # sqlite3.Row 对象使用字典式访问
     answer_status = row["answer_status"] if row["answer_status"] else "pending"
@@ -2256,7 +2300,7 @@ async def answer_status(
     return result
 
 
-def _generate_answer_for_job(job_id: str, user_id: int) -> bool:
+def _generate_answer_for_job(job_id: str, user_id: Optional[int] = None) -> bool:
     """
     为指定的job生成答案（完整流程：生成答案数据 + 生成答案PDF）
     
@@ -2289,7 +2333,8 @@ def _generate_answer_for_job(job_id: str, user_id: int) -> bool:
             logger.info(f"Answer data already exists for job {job_id}, generating PDF only")
         else:
             # 生成答案数据
-            logger.info(f"Generating answer key for job {job_id} (user {user_id})")
+            user_info = f"user {user_id}" if user_id else "anonymous user"
+            logger.info(f"Generating answer key for job {job_id} ({user_info})")
             
             # 导入generate_answer_key函数
             import sys
