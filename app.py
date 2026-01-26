@@ -471,6 +471,87 @@ worker.start()
 logger.info(f"Task queue worker thread started (max concurrent: {MAX_CONCURRENT_JOBS})")
 
 
+# -------------------- 自动清理任务（7天过期） --------------------
+def cleanup_old_jobs():
+    """
+    清理超过7天的job记录和文件
+    每天运行一次
+    """
+    while True:
+        try:
+            # 等待24小时（86400秒）
+            time.sleep(86400)  # 24小时
+            
+            logger.info("Starting cleanup of old jobs (7 days retention)")
+            cutoff_date = (datetime.utcnow() - timedelta(days=7)).isoformat()
+            
+            deleted_count = 0
+            deleted_files_count = 0
+            errors = []
+            
+            with get_db() as conn:
+                cur = conn.cursor()
+                # 查询所有超过7天的job
+                cur.execute(
+                    "SELECT id, created_at, file_name FROM jobs WHERE created_at < ?",
+                    (cutoff_date,)
+                )
+                old_jobs = cur.fetchall()
+                
+                logger.info(f"Found {len(old_jobs)} job(s) older than 7 days")
+                
+                for job_row in old_jobs:
+                    job_id = job_row["id"]
+                    created_at = job_row["created_at"]
+                    file_name = job_row["file_name"]
+                    
+                    try:
+                        # 删除文件目录
+                        job_dir = BUILD_ROOT / job_id
+                        if job_dir.exists():
+                            shutil.rmtree(job_dir)
+                            deleted_files_count += 1
+                            logger.debug(f"Deleted files for job {job_id} (created: {created_at})")
+                        else:
+                            logger.debug(f"Job directory not found for job {job_id}, skipping file deletion")
+                        
+                        # 删除数据库记录
+                        cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+                        deleted_count += 1
+                        logger.debug(f"Deleted database record for job {job_id}")
+                        
+                    except Exception as e:
+                        error_msg = f"Failed to delete job {job_id}: {str(e)}"
+                        errors.append(error_msg)
+                        logger.error(error_msg, exc_info=True)
+                        # 即使文件删除失败，也尝试删除数据库记录
+                        try:
+                            cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+                            deleted_count += 1
+                        except:
+                            pass
+                
+                conn.commit()
+            
+            logger.info(
+                f"Cleanup completed: {deleted_count} job(s) deleted from database, "
+                f"{deleted_files_count} file directory(ies) deleted. "
+                f"Errors: {len(errors)}"
+            )
+            
+            if errors:
+                logger.warning(f"Cleanup errors: {errors}")
+                
+        except Exception as e:
+            logger.error(f"Error in cleanup thread: {e}", exc_info=True)
+            # 即使出错也继续运行，等待下次清理
+
+# 启动清理线程（守护线程，每天运行一次）
+cleanup_thread = threading.Thread(target=cleanup_old_jobs, daemon=True)
+cleanup_thread.start()
+logger.info("Cleanup thread started (7 days retention policy)")
+
+
 # -------------------- 工具函数 --------------------
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
