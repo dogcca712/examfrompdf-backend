@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Req
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
 from pathlib import Path
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, List
@@ -44,6 +45,8 @@ BASE_DIR = Path(__file__).parent
 BUILD_ROOT = BASE_DIR / "build_jobs"
 BUILD_ROOT.mkdir(exist_ok=True)
 BUILD_DIR = BASE_DIR / "build"
+UPLOAD_SESSIONS_DIR = BASE_DIR / "upload_sessions"  # 文件上传暂存目录
+UPLOAD_SESSIONS_DIR.mkdir(exist_ok=True)
 DB_PATH = BASE_DIR / "data.db"
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "change_me")
@@ -518,7 +521,7 @@ logger.info(f"Task queue worker thread started (max concurrent: {MAX_CONCURRENT_
 # -------------------- 自动清理任务（7天过期） --------------------
 def cleanup_old_jobs():
     """
-    清理超过7天的job记录和文件
+    清理超过7天的job记录和文件，以及超过1小时的未使用session目录
     每天运行一次
     """
     while True:
@@ -526,12 +529,30 @@ def cleanup_old_jobs():
             # 等待24小时（86400秒）
             time.sleep(86400)  # 24小时
             
-            logger.info("Starting cleanup of old jobs (7 days retention)")
+            logger.info("Starting cleanup of old jobs (7 days retention) and old sessions (1 hour retention)")
             cutoff_date = (datetime.utcnow() - timedelta(days=7)).isoformat()
             
             deleted_count = 0
             deleted_files_count = 0
+            deleted_sessions_count = 0
             errors = []
+            
+            # 清理过期的session目录（超过1小时未使用）
+            if UPLOAD_SESSIONS_DIR.exists():
+                session_cutoff_time = time.time() - 3600  # 1小时前
+                for session_dir in UPLOAD_SESSIONS_DIR.iterdir():
+                    if session_dir.is_dir():
+                        try:
+                            # 检查目录的最后修改时间
+                            mtime = session_dir.stat().st_mtime
+                            if mtime < session_cutoff_time:
+                                shutil.rmtree(session_dir)
+                                deleted_sessions_count += 1
+                                logger.debug(f"Deleted old session directory: {session_dir.name}")
+                        except Exception as e:
+                            error_msg = f"Failed to delete session {session_dir.name}: {str(e)}"
+                            errors.append(error_msg)
+                            logger.warning(error_msg)
             
             with get_db() as conn:
                 cur = conn.cursor()
@@ -2099,15 +2120,98 @@ async def get_queue_status(current_user=Depends(get_current_user)):
 # 文件大小限制：50MB
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
+# Pydantic 模型
+class GenerateExamRequest(BaseModel):
+    session_id: str
+    mcq_count: int = 10
+    short_answer_count: int = 3
+    long_question_count: int = 1
+    difficulty: str = "medium"
+    special_requests: Optional[str] = None
+
+# -------------------- 文件上传 API --------------------
+@app.post("/upload")
+async def upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+    session_id: str = Form(...),
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """
+    上传单个PDF文件到指定session
+    返回：{ "success": true, "file_name": "...", "session_id": "...", "file_count": N }
+    """
+    # 验证文件类型
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+    
+    # 验证session_id格式（UUID格式）
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id format")
+    
+    # 创建session目录
+    session_dir = UPLOAD_SESSIONS_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 生成唯一文件名（避免重名覆盖）
+    file_index = len(list(session_dir.glob("*.pdf")))
+    save_path = session_dir / f"file_{file_index:03d}.pdf"
+    
+    # 保存文件（带超时和大小检查）
+    file_size = 0
+    start_time = time.time()
+    timeout = 60  # 1分钟超时
+    
+    try:
+        with save_path.open("wb") as f:
+            chunk_size = 8192  # 8KB chunks
+            while True:
+                # 检查超时
+                if time.time() - start_time > timeout:
+                    save_path.unlink(missing_ok=True)
+                    raise HTTPException(status_code=408, detail="File upload timeout (60s)")
+                
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                file_size += len(chunk)
+                
+                # 检查文件大小
+                if file_size > MAX_FILE_SIZE:
+                    save_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024 * 1024):.0f}MB"
+                    )
+                
+                f.write(chunk)
+        
+        # 统计session中的文件数量
+        file_count = len(list(session_dir.glob("*.pdf")))
+        
+        logger.info(f"[UPLOAD] File uploaded: {file.filename} ({file_size / (1024 * 1024):.2f}MB) to session {session_id}, total files: {file_count}")
+        
+        return {
+            "success": True,
+            "file_name": file.filename or "lecture.pdf",
+            "session_id": session_id,
+            "file_count": file_count,
+            "file_size": file_size
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        save_path.unlink(missing_ok=True)
+        logger.error(f"Failed to upload file: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+
+
 @app.post("/generate")
 async def generate_exam(
     request: Request,
-    lecture_pdf: List[UploadFile] = File(...),
-    mcq_count: int = Form(10),
-    short_answer_count: int = Form(3),
-    long_question_count: int = Form(1),
-    difficulty: str = Form("medium"),
-    special_requests: Optional[str] = Form(None),
+    config: GenerateExamRequest = Body(...),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """
@@ -2115,7 +2219,8 @@ async def generate_exam(
     - 认证用户：检查用量限制
     - 匿名用户：每天只能使用1次（通过设备指纹识别）
     
-    参数：
+    参数（JSON）：
+    - session_id: 上传session ID
     - mcq_count: 选择题数量（默认10）
     - short_answer_count: 简答题数量（默认3）
     - long_question_count: 论述题数量（默认1）
@@ -2123,26 +2228,36 @@ async def generate_exam(
     - special_requests: 用户特殊要求（可选，字符串）
     """
     try:
+        session_id = config.session_id
+        mcq_count = config.mcq_count
+        short_answer_count = config.short_answer_count
+        long_question_count = config.long_question_count
+        difficulty = config.difficulty
+        special_requests = config.special_requests
+        
         # 记录接收到的参数（用于调试）
-        logger.info(f"Received exam config: MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests[:50] if special_requests else 'None'}..., Files={len(lecture_pdf) if lecture_pdf else 0}")
+        logger.info(f"Received exam config: Session={session_id}, MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests[:50] if special_requests else 'None'}...")
         
-        # 调试：打印所有接收到的文件信息
-        if lecture_pdf:
-            for idx, pdf_file in enumerate(lecture_pdf):
-                logger.info(f"Received file {idx + 1}: {pdf_file.filename}, content_type: {pdf_file.content_type}")
-        else:
-            logger.warning("No files received in lecture_pdf parameter")
+        # 验证session_id格式
+        try:
+            uuid.UUID(session_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid session_id format")
         
-        # 验证文件类型和数量
-        if not lecture_pdf or len(lecture_pdf) == 0:
-            raise HTTPException(status_code=400, detail="Please upload at least one PDF file.")
+        # 从session目录读取文件
+        session_dir = UPLOAD_SESSIONS_DIR / session_id
+        if not session_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found. Please upload files first.")
         
-        if len(lecture_pdf) > 20:
+        # 获取所有PDF文件（按文件名排序）
+        pdf_files = sorted(session_dir.glob("*.pdf"))
+        if not pdf_files or len(pdf_files) == 0:
+            raise HTTPException(status_code=400, detail="No PDF files found in session. Please upload at least one PDF file.")
+        
+        if len(pdf_files) > 20:
             raise HTTPException(status_code=400, detail="Maximum 20 PDF files allowed.")
         
-        for pdf_file in lecture_pdf:
-            if pdf_file.content_type != "application/pdf":
-                raise HTTPException(status_code=400, detail=f"File '{pdf_file.filename}' is not a PDF file.")
+        logger.info(f"Found {len(pdf_files)} PDF file(s) in session {session_id}")
         
         # 验证参数
         if mcq_count < 0 or mcq_count > 50:
@@ -2193,13 +2308,13 @@ async def generate_exam(
 
         job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
-        if len(lecture_pdf) == 1:
-            file_name = lecture_pdf[0].filename or "lecture.pdf"
+        if len(pdf_files) == 1:
+            file_name = pdf_files[0].name
         else:
-            file_name = f"{lecture_pdf[0].filename or 'lecture.pdf'} (+{len(lecture_pdf) - 1} more)"
+            file_name = f"{pdf_files[0].name} (+{len(pdf_files) - 1} more)"
         created_at = datetime.utcnow().isoformat()
         
-        logger.info(f"[GENERATE] Starting job {job_id} for {user_type} user {user_id}, files: {len(lecture_pdf)} PDF(s), first: {lecture_pdf[0].filename}")
+        logger.info(f"[GENERATE] Starting job {job_id} for {user_type} user {user_id}, files: {len(pdf_files)} PDF(s) from session {session_id}")
         
         # 保存到数据库（商用级：移除内存状态，完全依赖数据库）
         try:
@@ -2249,39 +2364,40 @@ async def generate_exam(
             logger.error(f"Failed to create job directory: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create job directory")
 
-        # 保存文件（添加大小检查和错误处理，支持多个文件）
+        # 从session目录复制文件到job目录（添加大小检查和错误处理，支持多个文件）
         lecture_paths = []
         total_size = 0
         try:
-            for idx, pdf_file in enumerate(lecture_pdf):
+            for idx, source_file in enumerate(pdf_files):
                 # 单个文件：lecture.pdf，多个文件：lecture_0.pdf, lecture_1.pdf, ...
-                if len(lecture_pdf) == 1:
+                if len(pdf_files) == 1:
                     save_path = job_dir / "lecture.pdf"
                 else:
                     save_path = job_dir / f"lecture_{idx}.pdf"
                 
-                file_size = 0
-                with save_path.open("wb") as f:
-                    # 分块读取，避免内存问题，同时检查大小
-                    chunk_size = 8192  # 8KB chunks
-                    while True:
-                        chunk = pdf_file.file.read(chunk_size)
-                        if not chunk:
-                            break
-                        file_size += len(chunk)
-                        total_size += len(chunk)
-                        if total_size > MAX_FILE_SIZE * len(lecture_pdf):  # 总大小限制：单个文件限制 × 文件数
-                            save_path.unlink(missing_ok=True)  # 删除部分文件
-                            raise HTTPException(
-                                status_code=413,
-                                detail=f"Total file size too large. Maximum total size is {MAX_FILE_SIZE * len(lecture_pdf) / (1024 * 1024):.0f}MB for {len(lecture_pdf)} file(s)"
-                            )
-                        f.write(chunk)
+                # 检查文件大小
+                file_size = source_file.stat().st_size
+                total_size += file_size
                 
+                if total_size > MAX_FILE_SIZE * len(pdf_files):  # 总大小限制：单个文件限制 × 文件数
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Total file size too large. Maximum total size is {MAX_FILE_SIZE * len(pdf_files) / (1024 * 1024):.0f}MB for {len(pdf_files)} file(s)"
+                    )
+                
+                # 复制文件
+                shutil.copy2(source_file, save_path)
                 lecture_paths.append(save_path)
-                logger.info(f"File {idx + 1}/{len(lecture_pdf)} saved: {pdf_file.filename}, size: {file_size / (1024 * 1024):.2f}MB")
+                logger.info(f"File {idx + 1}/{len(pdf_files)} copied: {source_file.name}, size: {file_size / (1024 * 1024):.2f}MB")
             
-            logger.info(f"All {len(lecture_pdf)} file(s) saved, total size: {total_size / (1024 * 1024):.2f}MB")
+            logger.info(f"All {len(pdf_files)} file(s) copied, total size: {total_size / (1024 * 1024):.2f}MB")
+            
+            # 清理session目录（文件已复制到job目录）
+            try:
+                shutil.rmtree(session_dir)
+                logger.info(f"Session directory {session_id} cleaned up")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup session directory {session_id}: {e}", exc_info=True)
         except HTTPException:
             raise
         except Exception as e:
@@ -2333,10 +2449,14 @@ async def generate_exam(
         if not current_user:
             from fastapi.responses import JSONResponse
             json_response = JSONResponse(content={"job_id": job_id, "status": "queued", "message": "Job queued successfully"})
-            # 复制Cookie设置
-            for header, value in response.headers.items():
-                if header.lower() == "set-cookie":
-                    json_response.headers.append(header, value)
+            # 设置anon_id Cookie（如果需要）
+            from fastapi import Response
+            temp_response = Response()
+            anon_id = get_or_create_anon_id(request, temp_response)
+            if hasattr(temp_response, 'headers'):
+                for header, value in temp_response.headers.items():
+                    if header.lower() == "set-cookie":
+                        json_response.headers.append(header, value)
             return json_response
         
         return {"job_id": job_id, "status": "queued", "message": "Job queued successfully"}
