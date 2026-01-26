@@ -12,56 +12,36 @@
 \usepackage{fancyhdr}
 \usepackage{setspace}
 \usepackage{microtype}
-\usepackage{tabularx} % 方案A用来排版题干+marks
+\usepackage{tabularx} % ★ 新增：用于让题干换行但分数固定在右侧
 
 % ---- Fixed page setup ----
 \geometry{a4paper, margin=25mm}
 \setstretch{1.15}
 
 % ---- Fix fancyhdr headheight warning ----
-\setlength{\headheight}{15pt}
+\setlength{\headheight}{14.49998pt}
+\addtolength{\topmargin}{-2.49998pt}
 
-% ---- Header & footer ----
+% ---- Header / footer ----
 \pagestyle{fancy}
-\fancyhf{} % Clear all header and footer fields
+\fancyhf{}
+\lhead{\textit{((( course_code )))}}   % e.g., INFO1111
+\rhead{\textit{Practice Exam}}
+\cfoot{\thepage}
 
-% 左上角：Course name；右上角：Page X；中上：Exam title
-\lhead{((( course_name )))} 
-\chead{((( exam_title )))} 
-\rhead{Page \thepage}
-
-\cfoot{} % 页脚留空
-
-% ---- 首行标题 + 课程/日期/名字区域（恢复原样） ----
-\newcommand{\ExamTitle}[1]{%
-  \begin{center}
-    {\Large\bfseries #1\par}
-  \end{center}
-  \vspace{0.5em}
-}
-
-% 这里包含：Course / Date / Name / Student ID
+% ---- Utility macros ----
+\newcommand{\ExamTitle}[1]{\begin{center}\Large\textbf{#1}\end{center}\vspace{0.5em}}
 \newcommand{\ExamMeta}[2]{%
-  % Course / Date 一行
-  \noindent Course: #1 \hfill Date: #2\\[0.75em]
-  % Name / Student ID 一行，带下划线
-  \noindent Name: \rule{10em}{0.4pt}\hspace{2em}%
-  Student ID: \rule{10em}{0.4pt}\\[1.0em]
+\vspace{-0.3em}
+\noindent\textbf{Course:} #1 \hfill \textbf{Date:} #2\\
+\textbf{Name:} \underline{\hspace{7cm}} \hfill \textbf{Student ID:} \underline{\hspace{4cm}}\\
+\vspace{0.8em}
 }
 
-% ---- Question block: ensure enough space to avoid awkward page breaks ----
+% Keep questions from splitting badly
 \newcommand{\QBlockStart}[1]{\needspace{#1\baselineskip}}
 
 % ---------------- Question macros ----------------
-% 通用：题号 + 题干 + 分值放在一行里，题干在左列自动换行，marks 固定在右侧
-\newcommand{\QHeading}[3]{%
-  \QBlockStart{10}%
-  \noindent
-  \begin{tabularx}{\linewidth}{@{}Xr@{}}%
-    \textbf{Q#1.} #2 & \textbf{[#3~marks]} \\
-  \end{tabularx}\\[-0.2em]%
-}
-
 % MCQ args:
 %  #1 q number
 %  #2 stem
@@ -71,37 +51,41 @@
 %  #6 option D
 %  #7 marks
 \newcommand{\MCQ}[7]{%
-  \QHeading{#1}{#2}{#7}%
-  \begin{enumerate}[label=(\Alph*), itemsep=0.2em, topsep=0.2em, leftmargin=2.2em]
-    \item #3
-    \item #4
-    \item #5
-    \item #6
-  \end{enumerate}
-  \vspace{0.6em}
+\QBlockStart{10}
+% 用 tabularx：左边 X 列自动换行，右边 r 列固定显示分数
+\noindent\begin{tabularx}{\textwidth}{@{}Xr@{}}
+\textbf{Q#1.} #2 & \textbf{[#7~marks]}
+\end{tabularx}\\
+\begin{enumerate}[label=(\Alph*), itemsep=0.2em, topsep=0.2em, leftmargin=2.2em]
+  \item #3
+  \item #4
+  \item #5
+  \item #6
+\end{enumerate}
+\vspace{0.6em}
 }
 
-% SAQ: #1 q number, #2 stem, #3 marks
 \newcommand{\SAQ}[3]{%
-  \QHeading{#1}{#2}{#3}%
-  \vspace{8.5em}
+\QBlockStart{10}
+\noindent\begin{tabularx}{\textwidth}{@{}Xr@{}}
+\textbf{Q#1.} #2 & \textbf{[#3~marks]}
+\end{tabularx}\\
+\vspace{8.5em}
 }
 
-% LQ: #1 q number, #2 stem, #3 marks
 \newcommand{\LQ}[3]{%
-  \QBlockStart{14}%
-  \noindent
-  \begin{tabularx}{\linewidth}{@{}Xr@{}}%
-    \textbf{Q#1.} #2 & \textbf{[#3~marks]} \\
-  \end{tabularx}\\[-0.2em]%
-  \vspace{12.5em}
+\QBlockStart{14}
+\noindent\begin{tabularx}{\textwidth}{@{}Xr@{}}
+\textbf{Q#1.} #2 & \textbf{[#3~marks]}
+\end{tabularx}\\
+\vspace{12.5em}
 }
+
 
 \begin{document}
 
-% ---- 标题 + 课程/日期/姓名区域（第一页上半部） ----
 \ExamTitle{((( exam_title )))}
-\ExamMeta{((( course_name )))}{((( exam_date )))}
+\ExamMeta{((( course_name ))) }{((( exam_date )))}
 
 \noindent\textbf{Instructions}
 \begin{itemize}[itemsep=0.2em, topsep=0.2em]
@@ -117,15 +101,16 @@
 \noindent\textit{Choose the best answer for each question.}\\
 \vspace{0.5em}
 
+% --- MCQs generated from JSON ---
 ((* for q in mcq_questions *))
-\MCQ{((( loop.index )))}%
-{((( q.stem )))}%
+\MCQ{((( loop.index )))}{((( q.stem )))}%
 {((( q.options[0] )))}%
 {((( q.options[1] )))}%
 {((( q.options[2] )))}%
 {((( q.options[3] )))}%
 {((( q.marks )))}%
 ((* endfor *))
+
 
 \vspace{0.6em}
 
@@ -138,6 +123,8 @@
 \SAQ{((( mcq_count + loop.index )))}{((( q.stem )))}{((( q.marks )))}%
 ((* endfor *))
 
+
+
 % ---------------- Section C ----------------
 \noindent\Large\textbf{Section C: Long Question}\normalsize\\
 \vspace{0.5em}
@@ -145,5 +132,6 @@
 ((* for q in lq_questions *))
 \LQ{((( mcq_count + saq_count + loop.index )))}{((( q.stem )))}{((( q.marks )))}%
 ((* endfor *))
+
 
 \end{document}
