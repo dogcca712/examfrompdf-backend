@@ -12,7 +12,7 @@
 \usepackage{fancyhdr}
 \usepackage{setspace}
 \usepackage{microtype}
-\usepackage{tabularx}
+\usepackage{tabularx} % 方案A用来排版题干+marks
 
 % ---- Fixed page setup ----
 \geometry{a4paper, margin=25mm}
@@ -25,26 +25,35 @@
 \pagestyle{fancy}
 \fancyhf{} % Clear all header and footer fields
 
-% 左上角：Course name；右上角：Page X of N；中上：Exam title
+% 左上角：Course name；右上角：Page X；中上：Exam title
 \lhead{((( course_name )))} 
 \chead{((( exam_title )))} 
 \rhead{Page \thepage}
 
-% 页脚可以留空或写上考试信息
-\cfoot{}
+\cfoot{} % 页脚留空
+
+% ---- 首行标题 + 课程/日期/名字区域（恢复原样） ----
+\newcommand{\ExamTitle}[1]{%
+  \begin{center}
+    {\Large\bfseries #1\par}
+  \end{center}
+  \vspace{0.5em}
+}
+
+% 这里包含：Course / Date / Name / Student ID
+\newcommand{\ExamMeta}[2]{%
+  % Course / Date 一行
+  \noindent Course: #1 \hfill Date: #2\\[0.75em]
+  % Name / Student ID 一行，带下划线
+  \noindent Name: \rule{10em}{0.4pt}\hspace{2em}%
+  Student ID: \rule{10em}{0.4pt}\\[1.0em]
+}
 
 % ---- Question block: ensure enough space to avoid awkward page breaks ----
 \newcommand{\QBlockStart}[1]{\needspace{#1\baselineskip}}
 
 % ---------------- Question macros ----------------
-% MCQ args:
-%  #1 q number
-%  #2 stem
-%  #3 option A
-%  #4 option B
-%  #5 option C
-%  #6 option D
-%  #7 marks
+% 通用：题号 + 题干 + 分值放在一行里，题干在左列自动换行，marks 固定在右侧
 \newcommand{\QHeading}[3]{%
   \QBlockStart{10}%
   \noindent
@@ -53,6 +62,14 @@
   \end{tabularx}\\[-0.2em]%
 }
 
+% MCQ args:
+%  #1 q number
+%  #2 stem
+%  #3 option A
+%  #4 option B
+%  #5 option C
+%  #6 option D
+%  #7 marks
 \newcommand{\MCQ}[7]{%
   \QHeading{#1}{#2}{#7}%
   \begin{enumerate}[label=(\Alph*), itemsep=0.2em, topsep=0.2em, leftmargin=2.2em]
@@ -64,11 +81,13 @@
   \vspace{0.6em}
 }
 
+% SAQ: #1 q number, #2 stem, #3 marks
 \newcommand{\SAQ}[3]{%
   \QHeading{#1}{#2}{#3}%
   \vspace{8.5em}
 }
 
+% LQ: #1 q number, #2 stem, #3 marks
 \newcommand{\LQ}[3]{%
   \QBlockStart{14}%
   \noindent
@@ -78,11 +97,11 @@
   \vspace{12.5em}
 }
 
-
 \begin{document}
 
+% ---- 标题 + 课程/日期/姓名区域（第一页上半部） ----
 \ExamTitle{((( exam_title )))}
-\ExamMeta{((( course_name ))) }{((( exam_date )))}
+\ExamMeta{((( course_name )))}{((( exam_date )))}
 
 \noindent\textbf{Instructions}
 \begin{itemize}[itemsep=0.2em, topsep=0.2em]
@@ -98,7 +117,6 @@
 \noindent\textit{Choose the best answer for each question.}\\
 \vspace{0.5em}
 
-% ---- Render MCQs from template variables ----
 ((* for q in mcq_questions *))
 \MCQ{((( loop.index )))}%
 {((( q.stem )))}%
@@ -108,8 +126,6 @@
 {((( q.options[3] )))}%
 {((( q.marks )))}%
 ((* endfor *))
-
-
 
 \vspace{0.6em}
 
@@ -122,8 +138,6 @@
 \SAQ{((( mcq_count + loop.index )))}{((( q.stem )))}{((( q.marks )))}%
 ((* endfor *))
 
-
-
 % ---------------- Section C ----------------
 \noindent\Large\textbf{Section C: Long Question}\normalsize\\
 \vspace{0.5em}
@@ -131,6 +145,5 @@
 ((* for q in lq_questions *))
 \LQ{((( mcq_count + saq_count + loop.index )))}{((( q.stem )))}{((( q.marks )))}%
 ((* endfor *))
-
 
 \end{document}
