@@ -30,7 +30,7 @@ try:
     PDF_PREVIEW_AVAILABLE = True
 except ImportError:
     PDF_PREVIEW_AVAILABLE = False
-    logger.warning("PyMuPDF or Pillow not available, PDF preview feature will be disabled")
+    # 注意：logger 还未定义，使用 print 或延迟警告
 
 # 配置日志
 logging.basicConfig(
