@@ -21,6 +21,16 @@ from contextlib import contextmanager
 import queue
 from threading import Semaphore, Lock
 import hashlib
+import io
+
+# PDF预览图生成依赖
+try:
+    import fitz  # PyMuPDF
+    from PIL import Image, ImageDraw, ImageFont
+    PDF_PREVIEW_AVAILABLE = True
+except ImportError:
+    PDF_PREVIEW_AVAILABLE = False
+    logger.warning("PyMuPDF or Pillow not available, PDF preview feature will be disabled")
 
 # 配置日志
 logging.basicConfig(
@@ -1283,6 +1293,131 @@ async def purchase_download(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+def _generate_preview_image(job_id: str, pdf_path: Path, job_dir: Path):
+    """
+    生成PDF第一页的预览图（带水印）
+    
+    参数:
+    - job_id: 任务ID
+    - pdf_path: PDF文件路径
+    - job_dir: job目录路径
+    
+    生成的文件:
+    - job_dir/build/preview.png (800x1100px, A4比例)
+    """
+    if not PDF_PREVIEW_AVAILABLE:
+        logger.warning("PDF preview libraries not available, skipping preview generation")
+        return
+    
+    try:
+        # 打开PDF文件
+        pdf_document = fitz.open(pdf_path)
+        
+        if len(pdf_document) == 0:
+            logger.warning(f"PDF {pdf_path} has no pages, cannot generate preview")
+            pdf_document.close()
+            return
+        
+        # 获取第一页
+        first_page = pdf_document[0]
+        
+        # 计算缩放比例以得到800x1100的尺寸（A4比例）
+        # A4尺寸: 210mm x 297mm，比例约为 1:1.414
+        # 目标尺寸: 800x1100 (比例约为 1:1.375，接近A4)
+        target_width = 800
+        target_height = 1100
+        
+        # 获取原始页面尺寸
+        page_rect = first_page.rect
+        page_width = page_rect.width
+        page_height = page_rect.height
+        
+        # 计算缩放比例（保持宽高比，以宽度为准）
+        zoom_x = target_width / page_width
+        zoom_y = target_height / page_height
+        zoom = min(zoom_x, zoom_y)  # 取较小的值，确保不超出目标尺寸
+        
+        # 设置矩阵（缩放）
+        mat = fitz.Matrix(zoom, zoom)
+        
+        # 渲染页面为图片（DPI会影响质量，这里使用缩放矩阵）
+        pix = first_page.get_pixmap(matrix=mat, alpha=False)
+        
+        # 转换为PIL Image
+        img_data = pix.tobytes("png")
+        img = Image.open(io.BytesIO(img_data))
+        
+        # 如果图片尺寸不是目标尺寸，进行裁剪或填充
+        if img.size != (target_width, target_height):
+            # 创建目标尺寸的白色背景
+            preview_img = Image.new("RGB", (target_width, target_height), "white")
+            # 计算居中位置
+            x_offset = (target_width - img.width) // 2
+            y_offset = (target_height - img.height) // 2
+            # 粘贴图片到中心
+            preview_img.paste(img, (x_offset, y_offset))
+            img = preview_img
+        
+        # 添加水印
+        draw = ImageDraw.Draw(img)
+        
+        # 尝试使用系统字体，如果失败则使用默认字体
+        try:
+            # 尝试使用较大的字体
+            font_size = 32
+            font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
+        except:
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
+            except:
+                # 使用默认字体
+                font = ImageFont.load_default()
+        
+        # 水印文字
+        watermark_text = "PREVIEW - Pay to Download Full Exam"
+        
+        # 计算文字位置（居中，稍微偏下）
+        bbox = draw.textbbox((0, 0), watermark_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        x = (target_width - text_width) // 2
+        y = target_height - text_height - 50  # 距离底部50像素
+        
+        # 添加半透明背景框（让文字更清晰）
+        padding = 10
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        overlay_draw.rectangle(
+            [x - padding, y - padding, x + text_width + padding, y + text_height + padding],
+            fill=(0, 0, 0, 180)  # 半透明黑色背景
+        )
+        img = Image.alpha_composite(img.convert("RGBA"), overlay)
+        
+        # 重新创建draw对象（因为img现在是RGBA模式）
+        draw = ImageDraw.Draw(img)
+        
+        # 绘制文字阴影（深灰色，稍微偏移）
+        draw.text((x + 2, y + 2), watermark_text, fill=(50, 50, 50, 255), font=font)
+        # 绘制文字（白色）
+        draw.text((x, y), watermark_text, fill="white", font=font)
+        
+        # 转换回RGB模式
+        img = img.convert("RGB")
+        
+        # 保存预览图
+        preview_path = job_dir / "build" / "preview.png"
+        img.save(preview_path, "PNG", optimize=True)
+        
+        logger.info(f"Preview image generated successfully for job {job_id} at {preview_path}")
+        
+        # 关闭PDF文档
+        pdf_document.close()
+        
+    except Exception as e:
+        logger.error(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
+        raise
+
+
 def _generate_answer_for_job_if_missing(job_id: str, user_id: int) -> bool:
     """
     为指定的job生成答案（如果缺失）
@@ -1617,7 +1752,14 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
                 if warnings:
                     logger.warning(f"LaTeX warnings: {warnings[:5]}")  # 只记录前5个警告
 
-        # 4) 不再自动生成答案PDF，等用户付款后再生成（节省token）
+        # 4) 生成预览图（第一页，带水印）
+        try:
+            _generate_preview_image(job_id, pdf_path, job_dir)
+        except Exception as e:
+            logger.warning(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
+            # 预览图生成失败不影响主流程，继续执行
+
+        # 5) 不再自动生成答案PDF，等用户付款后再生成（节省token）
         logger.info(f"Skipping answer generation for job {job_id} (will be generated after payment)")
 
         # 更新数据库（商用级：移除内存状态）
@@ -2153,6 +2295,66 @@ async def download_exam(
         path=str(pdf_path),
         media_type="application/pdf",
         filename="exam_generated.pdf",
+    )
+
+
+@app.get("/preview/{job_id}")
+async def preview_exam(
+    request: Request,
+    job_id: str,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional),
+):
+    """
+    获取PDF第一页预览图（带水印）
+    支持匿名用户和认证用户
+    """
+    # 验证job是否存在且属于当前用户/设备
+    with get_db() as conn:
+        cur = conn.cursor()
+        if current_user:
+            # 认证用户：验证 job 属于该用户
+            cur.execute(
+                "SELECT id, user_id, status FROM jobs WHERE id = ?",
+                (job_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Job not found")
+            # 如果 job 有 user_id，必须匹配
+            if row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+        else:
+            # 匿名用户：验证 job 属于该设备
+            device_fingerprint = get_device_fingerprint(request)
+            cur.execute(
+                "SELECT id, user_id, status, device_fingerprint FROM jobs WHERE id = ?",
+                (job_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Job not found")
+            # 如果 job 有 user_id，匿名用户不能访问
+            if row["user_id"] is not None:
+                raise HTTPException(status_code=403, detail="Access denied: this job belongs to a registered user. Please log in.")
+            # 验证设备指纹
+            if row["device_fingerprint"] != device_fingerprint:
+                raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
+    
+    if row["status"] != "done":
+        raise HTTPException(status_code=400, detail="Job not completed yet")
+    
+    # 从文件系统读取预览图
+    job_dir = BUILD_ROOT / job_id
+    preview_path = job_dir / "build" / "preview.png"
+    
+    if not preview_path.exists():
+        logger.warning(f"Preview image not found for job {job_id} at {preview_path}")
+        raise HTTPException(status_code=404, detail="Preview image not found")
+    
+    return FileResponse(
+        path=str(preview_path),
+        media_type="image/png",
+        filename="preview.png",
     )
 
 
