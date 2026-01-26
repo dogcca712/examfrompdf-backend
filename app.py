@@ -58,8 +58,10 @@ security = HTTPBearer(auto_error=False)
 
 # Stripe 配置
 STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", STRIPE_API_KEY)  # 兼容旧的环境变量名
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-stripe.api_key = STRIPE_API_KEY if STRIPE_API_KEY else None
+STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")  # $0.99 下载解锁的价格ID
+stripe.api_key = STRIPE_SECRET_KEY if STRIPE_SECRET_KEY else None
 
 PRICE_IDS = {
     "starter": os.environ.get("STRIPE_PRICE_STARTER", ""),
@@ -372,6 +374,27 @@ def migrate_db():
                 logger.info("Successfully added answer_status column")
             except Exception as e:
                 logger.error(f"Failed to add answer_status column: {e}", exc_info=True)
+        
+        # 重新获取列列表（因为可能已经添加了新列）
+        cur.execute("PRAGMA table_info(jobs)")
+        columns = [row[1] for row in cur.fetchall()]
+        
+        # 添加支付解锁相关字段（如果不存在）
+        if "is_unlocked" not in columns:
+            logger.info("Adding is_unlocked column to jobs table")
+            try:
+                cur.execute("ALTER TABLE jobs ADD COLUMN is_unlocked INTEGER DEFAULT 0")  # SQLite uses INTEGER for boolean
+                logger.info("Successfully added is_unlocked column")
+            except Exception as e:
+                logger.error(f"Failed to add is_unlocked column: {e}", exc_info=True)
+        
+        if "unlocked_at" not in columns:
+            logger.info("Adding unlocked_at column to jobs table")
+            try:
+                cur.execute("ALTER TABLE jobs ADD COLUMN unlocked_at TEXT")
+                logger.info("Successfully added unlocked_at column")
+            except Exception as e:
+                logger.error(f"Failed to add unlocked_at column: {e}", exc_info=True)
         
         # 检查 user_id 列是否允许 NULL（SQLite不支持直接修改NOT NULL约束，需要重建表）
         cur.execute("PRAGMA table_info(jobs)")
@@ -1179,6 +1202,11 @@ def upsert_subscription(
 
 @app.post("/payments/webhook")
 async def stripe_webhook(request: Request):
+    """
+    处理 Stripe Webhook 事件
+    - checkout.session.completed: 解锁下载权限（订阅或一次性支付）
+    - customer.subscription.updated/deleted: 更新订阅状态
+    """
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="Stripe webhook secret not configured")
 
@@ -1187,25 +1215,95 @@ async def stripe_webhook(request: Request):
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except stripe.error.SignatureVerificationError:
+        logger.error("Invalid Stripe webhook signature")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    if event["type"] in ("checkout.session.completed",):
-        session = event["data"]["object"]
-        metadata = session.get("metadata", {})
-        user_id = metadata.get("user_id")
-        plan = metadata.get("plan", "starter")
-        sub_id = session.get("subscription")
-        customer_id = session.get("customer")
-        status = "active"
-        current_period_end = None
-        if sub_id:
-            sub_obj = stripe.Subscription.retrieve(sub_id)
-            current_period_end = sub_obj.get("current_period_end")
-            status = sub_obj.get("status", status)
-        if user_id:
-            upsert_subscription(int(user_id), plan, customer_id, sub_id, status, current_period_end)
+    event_type = event["type"]
+    logger.info(f"Received Stripe webhook event: {event_type}")
 
-    if event["type"] in ("customer.subscription.updated", "customer.subscription.deleted"):
+    # 处理 checkout.session.completed 事件
+    if event_type == "checkout.session.completed":
+        session = event["data"]["object"]
+        session_id = session.get("id")
+        metadata = session.get("metadata", {})
+        payment_type = metadata.get("type")
+        
+        # 处理订阅支付
+        if payment_type != "download_purchase":
+            user_id = metadata.get("user_id")
+            plan = metadata.get("plan", "starter")
+            sub_id = session.get("subscription")
+            customer_id = session.get("customer")
+            status = "active"
+            current_period_end = None
+            if sub_id:
+                sub_obj = stripe.Subscription.retrieve(sub_id)
+                current_period_end = sub_obj.get("current_period_end")
+                status = sub_obj.get("status", status)
+            if user_id:
+                upsert_subscription(int(user_id), plan, customer_id, sub_id, status, current_period_end)
+        
+        # 处理下载解锁支付
+        elif payment_type == "download_purchase":
+            job_id = metadata.get("job_id")
+            user_id = metadata.get("user_id")
+            device_fingerprint = metadata.get("device_fingerprint")
+            
+            if not job_id:
+                logger.error(f"Missing job_id in webhook metadata: {metadata}")
+                return {"received": True}
+            
+            logger.info(f"Processing download purchase webhook: job_id={job_id}, user_id={user_id}, session_id={session_id}")
+            
+            try:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    
+                    # 验证 job 是否存在
+                    cur.execute("SELECT id, user_id, device_fingerprint FROM jobs WHERE id = ?", (job_id,))
+                    job_row = cur.fetchone()
+                    
+                    if not job_row:
+                        logger.error(f"Job {job_id} not found in database")
+                        return {"received": True}
+                    
+                    # 验证用户匹配（如果提供了 user_id 或 device_fingerprint）
+                    if user_id and job_row["user_id"] is not None:
+                        if int(job_row["user_id"]) != int(user_id):
+                            logger.warning(f"User ID mismatch: webhook user_id={user_id}, job user_id={job_row['user_id']}")
+                    
+                    if device_fingerprint and job_row["device_fingerprint"]:
+                        if job_row["device_fingerprint"] != device_fingerprint:
+                            logger.warning(f"Device fingerprint mismatch for job {job_id}")
+                    
+                    # 解锁 job
+                    unlocked_at = datetime.utcnow().isoformat()
+                    cur.execute(
+                        "UPDATE jobs SET is_unlocked = 1, unlocked_at = ? WHERE id = ?",
+                        (unlocked_at, job_id)
+                    )
+                    
+                    # 更新交易记录状态
+                    amount = session.get("amount_total", 99)  # 默认 $0.99
+                    currency = session.get("currency", "usd")
+                    completed_at = datetime.utcnow().isoformat()
+                    cur.execute(
+                        """
+                        UPDATE transactions 
+                        SET status = 'completed', completed_at = ?, amount = ?, currency = ?
+                        WHERE stripe_session_id = ?
+                        """,
+                        (completed_at, amount, currency, session_id)
+                    )
+                    
+                    logger.info(f"Successfully unlocked job {job_id} via webhook")
+                    
+            except Exception as e:
+                logger.error(f"Error processing download purchase webhook: {e}", exc_info=True)
+                # 不抛出异常，避免 Stripe 重试
+
+    # 处理订阅更新/删除事件
+    elif event_type in ("customer.subscription.updated", "customer.subscription.deleted"):
         sub = event["data"]["object"]
         user_id = sub.get("metadata", {}).get("user_id")
         plan = sub.get("metadata", {}).get("plan", "starter")
@@ -1220,6 +1318,68 @@ async def stripe_webhook(request: Request):
             )
 
     return {"received": True}
+
+
+@app.get("/payments/unlock-status/{job_id}")
+async def get_unlock_status(
+    job_id: str,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional),
+    request: Request = None
+):
+    """
+    检查某个 job 是否已解锁下载
+    
+    返回：
+    {
+        "unlocked": true/false,
+        "unlocked_at": "2024-01-01T00:00:00" (如果已解锁)
+    }
+    """
+    try:
+        # 验证 job 是否存在且属于当前用户/设备
+        with get_db() as conn:
+            cur = conn.cursor()
+            if current_user:
+                # 认证用户：验证 job 属于该用户
+                cur.execute(
+                    "SELECT id, user_id, is_unlocked, unlocked_at FROM jobs WHERE id = ?",
+                    (job_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Job not found")
+                # 如果 job 有 user_id，必须匹配
+                if row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                    raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
+            else:
+                # 匿名用户：验证 job 属于该设备
+                device_fingerprint = get_device_fingerprint(request)
+                cur.execute(
+                    "SELECT id, user_id, device_fingerprint, is_unlocked, unlocked_at FROM jobs WHERE id = ?",
+                    (job_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Job not found")
+                # 如果 job 有 user_id，匿名用户不能访问
+                if row["user_id"] is not None:
+                    raise HTTPException(status_code=403, detail="Access denied: this job belongs to a registered user. Please log in.")
+                # 验证设备指纹
+                if row["device_fingerprint"] != device_fingerprint:
+                    raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
+            
+            is_unlocked = bool(row["is_unlocked"]) if row["is_unlocked"] else False
+            unlocked_at = row["unlocked_at"] if row["unlocked_at"] else None
+            
+            return {
+                "unlocked": is_unlocked,
+                "unlocked_at": unlocked_at
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in get_unlock_status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.get("/payments/subscription")
@@ -1242,10 +1402,10 @@ async def purchase_download(
 ):
     """
     购买下载权限的支付端点（支持匿名用户和认证用户）
+    固定价格 $0.99
     
     请求体：
     - job_id: 要购买的job ID（必需）
-    - amount: 金额（美分，可选，默认值由后端决定）
     
     返回：
     - Mock模式: { "success": true, "unlocked": true }
@@ -1257,7 +1417,7 @@ async def purchase_download(
             raise HTTPException(status_code=400, detail="job_id is required")
         
         user_info = f"user_id={current_user['id']}" if current_user else "anonymous"
-        logger.info(f"[PURCHASE-DOWNLOAD] Request from {user_info}, job_id={job_id}, payload={payload}")
+        logger.info(f"[PURCHASE-DOWNLOAD] Request from {user_info}, job_id={job_id}")
         
         # 验证 job 是否存在且属于当前用户/设备
         with get_db() as conn:
@@ -1265,7 +1425,7 @@ async def purchase_download(
             if current_user:
                 # 认证用户：验证 job 属于该用户
                 cur.execute(
-                    "SELECT id, user_id, device_fingerprint FROM jobs WHERE id = ?",
+                    "SELECT id, user_id, device_fingerprint, status, is_unlocked FROM jobs WHERE id = ?",
                     (job_id,)
                 )
                 row = cur.fetchone()
@@ -1278,7 +1438,7 @@ async def purchase_download(
                 # 匿名用户：验证 job 属于该设备
                 device_fingerprint = get_device_fingerprint(request)
                 cur.execute(
-                    "SELECT id, user_id, device_fingerprint FROM jobs WHERE id = ?",
+                    "SELECT id, user_id, device_fingerprint, status, is_unlocked FROM jobs WHERE id = ?",
                     (job_id,)
                 )
                 row = cur.fetchone()
@@ -1290,33 +1450,55 @@ async def purchase_download(
                 # 验证设备指纹
                 if row["device_fingerprint"] != device_fingerprint:
                     raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
+            
+            # 检查 job 是否已完成
+            if row["status"] != "done":
+                raise HTTPException(status_code=400, detail="Job is not completed yet")
+            
+            # 检查是否已经解锁
+            if row["is_unlocked"]:
+                logger.info(f"Job {job_id} is already unlocked for {user_info}")
+                return {"success": True, "unlocked": True, "message": "Job is already unlocked"}
         
-        # Mock 模式：直接返回成功
+        # Mock 模式：直接返回成功并解锁
         if ENABLE_MOCK_PAYMENT:
             logger.info(f"Mock payment enabled: granting download access for {user_info}, job_id={job_id}")
+            # 在 Mock 模式下直接解锁
+            with get_db() as conn:
+                cur = conn.cursor()
+                unlocked_at = datetime.utcnow().isoformat()
+                cur.execute(
+                    "UPDATE jobs SET is_unlocked = 1, unlocked_at = ? WHERE id = ?",
+                    (unlocked_at, job_id)
+                )
             return {"success": True, "unlocked": True}
         
         # 正常模式：创建 Stripe Checkout Session
-        if not STRIPE_API_KEY:
+        if not STRIPE_SECRET_KEY:
             # 如果没有配置 Stripe 且不在生产环境，自动启用 Mock 模式
             if not IS_PRODUCTION:
                 logger.warning("Stripe API key not configured, but not in production. Using mock mode as fallback.")
                 logger.info(f"Mock payment (fallback): unlocking job {job_id} for {user_info}")
+                # Mock 模式下直接解锁
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    unlocked_at = datetime.utcnow().isoformat()
+                    cur.execute(
+                        "UPDATE jobs SET is_unlocked = 1, unlocked_at = ? WHERE id = ?",
+                        (unlocked_at, job_id)
+                    )
                 return {"success": True, "unlocked": True}
             else:
                 logger.error("Stripe API key not configured in production environment")
                 raise HTTPException(status_code=500, detail="Stripe API key not configured")
         
-        # 获取金额（美分），如果没有提供则使用默认值
-        amount = payload.get("amount", 299)  # 默认 $2.99
-        if not isinstance(amount, int) or amount < 50:  # 最少 $0.50
-            logger.warning(f"Invalid amount: {amount}")
-            raise HTTPException(status_code=400, detail="Invalid amount (minimum 50 cents)")
+        # 固定价格 $0.99 (99 美分)
+        amount = 99
         
         # 构建成功和取消URL
-        base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com")
-        success_url = f"{base_url}/payments/success?session_id={{CHECKOUT_SESSION_ID}}"
-        cancel_url = f"{base_url}/payments/cancel"
+        base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com").rstrip('/')
+        success_url = f"{base_url}?payment=success&job_id={job_id}"
+        cancel_url = f"{base_url}?payment=cancelled"
         
         logger.info(f"Creating Stripe checkout session: amount=${amount/100:.2f}, job_id={job_id}, {user_info}")
         
@@ -1337,9 +1519,14 @@ async def purchase_download(
                 metadata["device_fingerprint"] = device_fingerprint
                 customer_email = None  # 匿名用户可能没有邮箱
             
-            session_params = {
-                "mode": "payment",  # 一次性支付，不是订阅
-                "line_items": [{
+            # 构建 line_items：优先使用 STRIPE_PRICE_ID，否则使用 price_data
+            if STRIPE_PRICE_ID:
+                line_items = [{
+                    "price": STRIPE_PRICE_ID,
+                    "quantity": 1,
+                }]
+            else:
+                line_items = [{
                     "price_data": {
                         "currency": "usd",
                         "product_data": {
@@ -1349,7 +1536,11 @@ async def purchase_download(
                         "unit_amount": amount,  # 金额（美分）
                     },
                     "quantity": 1,
-                }],
+                }]
+            
+            session_params = {
+                "mode": "payment",  # 一次性支付，不是订阅
+                "line_items": line_items,
                 "success_url": success_url,
                 "cancel_url": cancel_url,
                 "metadata": metadata,
@@ -1360,6 +1551,20 @@ async def purchase_download(
                 session_params["customer_email"] = customer_email
             
             session = stripe.checkout.Session.create(**session_params)
+            
+            # 保存交易记录（状态为 pending）
+            with get_db() as conn:
+                cur = conn.cursor()
+                created_at = datetime.utcnow().isoformat()
+                user_id_val = current_user["id"] if current_user else None
+                cur.execute(
+                    """
+                    INSERT INTO transactions (job_id, user_id, stripe_session_id, amount, currency, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (job_id, user_id_val, session.id, amount, "usd", "pending", created_at)
+                )
+            
             logger.info(f"Created checkout session {session.id} for {user_info}, amount: ${amount/100:.2f}")
             return {"checkout_url": session.url}
         except stripe.error.StripeError as e:
@@ -1865,13 +2070,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     # 处理多个PDF文件：确保所有文件都在job_dir中
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
-        if len(lecture_paths) == 1:
+            job_lecture = job_dir / "lecture.pdf"
             job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
-        if lecture_path != job_lecture:
+            shutil.copy2(lecture_path, job_lecture)
             shutil.copy2(lecture_path, job_lecture)
         
         job_lecture_paths.append(job_lecture)
@@ -2021,8 +2226,8 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
 
         # 4) 生成预览图（第一页，带水印）
         try:
-            _generate_preview_image(job_id, pdf_path, job_dir)
         except Exception as e:
+    except Exception as e:
             logger.warning(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
             # 预览图生成失败不影响主流程，继续执行
 
@@ -2521,8 +2726,8 @@ async def job_status(
             )
             row = cur.fetchone()
             if row:
-                logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
             else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
