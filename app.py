@@ -2042,12 +2042,14 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
         "total": 10
     }
     """
+    logger.info(f"[GET JOBS] Request from user_id={current_user['id']}, limit={limit}, offset={offset}")
     with get_db() as conn:
         cur = conn.cursor()
         # 先获取总数（包括user_id匹配的，以及user_id为NULL但device_fingerprint匹配的）
         # 注意：这里只统计user_id匹配的，因为匿名用户的job不应该出现在认证用户的历史中
         cur.execute("SELECT COUNT(*) as total FROM jobs WHERE user_id = ?", (current_user["id"],))
         total = cur.fetchone()["total"]
+        logger.info(f"[GET JOBS] Found {total} total jobs for user_id={current_user['id']}")
         
         # 获取任务列表（只返回user_id匹配的job）
         # 如果job的user_id为NULL，说明是匿名用户创建的，不应该出现在认证用户的历史中
@@ -2062,6 +2064,7 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
             (current_user["id"], limit, offset),
         )
         rows = cur.fetchall()
+        logger.info(f"[GET JOBS] Returning {len(rows)} jobs for user_id={current_user['id']}")
     
     jobs = []
     for row in rows:
