@@ -2207,13 +2207,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         
         job_lecture_paths.append(job_lecture)
 
@@ -2362,7 +2362,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
 
         # 4) 生成预览图（第一页，带水印）
         try:
-        except Exception as e:
+            _generate_preview_image(job_id, pdf_path, job_dir)
     except Exception as e:
             logger.warning(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
             # 预览图生成失败不影响主流程，继续执行
