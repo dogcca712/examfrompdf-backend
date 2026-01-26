@@ -1,5 +1,6 @@
 import json
 import re
+import random
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 import os
@@ -60,10 +61,47 @@ def latex_escape(s: str) -> str:
     
     return s
 def sanitize_mcq(q):
+    """
+    处理MCQ题目：随机打乱选项顺序，并根据correct_answer_text确定correct_option
+    """
+    stem = latex_escape(q.get("stem", ""))
+    original_options = q.get("options", ["", "", "", ""])
+    correct_answer_text = q.get("correct_answer_text", "")
+    marks = q.get("marks", 2)
+    
+    # 转义选项文本
+    escaped_options = [latex_escape(x) for x in original_options]
+    
+    # 找到正确答案在原始选项中的索引
+    correct_index = -1
+    for i, opt in enumerate(original_options):
+        if opt.strip() == correct_answer_text.strip():
+            correct_index = i
+            break
+    
+    # 如果找不到正确答案，使用第一个选项作为默认（但会记录警告）
+    if correct_index == -1:
+        print(f"WARNING: correct_answer_text '{correct_answer_text}' not found in options. Using first option as default.")
+        correct_index = 0
+    
+    # 创建选项索引列表，用于打乱
+    indices = list(range(len(escaped_options)))
+    # 随机打乱索引
+    random.shuffle(indices)
+    
+    # 根据打乱后的索引重新排列选项
+    shuffled_options = [escaped_options[i] for i in indices]
+    
+    # 找到正确答案在新顺序中的位置
+    new_correct_index = indices.index(correct_index)
+    # 转换为字母（A=0, B=1, C=2, D=3）
+    correct_option = chr(65 + new_correct_index)  # 65是'A'的ASCII码
+    
     return {
-        "stem": latex_escape(q.get("stem", "")),
-        "options": [latex_escape(x) for x in q.get("options", ["", "", "", ""])],
-        "marks": q.get("marks", 2),
+        "stem": stem,
+        "options": shuffled_options,
+        "correct_option": correct_option,  # 保存打乱后的正确答案字母
+        "marks": marks,
     }
 
 def sanitize_simple(q):
@@ -84,7 +122,23 @@ def main():
     saq_questions_raw = sections.get("saq", [])
     lq_questions_raw  = sections.get("lq", [])
 
-    mcq_questions = [sanitize_mcq(q) for q in mcq_questions_raw]
+    # 处理MCQ题目（随机打乱选项并确定correct_option）
+    mcq_questions = []
+    mcq_correct_options = []  # 保存打乱后的正确答案，用于后续答案生成
+    for q in mcq_questions_raw:
+        sanitized = sanitize_mcq(q)
+        mcq_questions.append(sanitized)
+        mcq_correct_options.append(sanitized.get("correct_option", "A"))
+    
+    # 将correct_option保存回exam_data.json（用于答案生成）
+    for i, correct_option in enumerate(mcq_correct_options):
+        if i < len(exam_data["sections"]["mcq"]):
+            exam_data["sections"]["mcq"][i]["correct_option"] = correct_option
+    
+    # 保存更新后的exam_data.json（包含correct_option）
+    with open(EXAM_DATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(exam_data, f, ensure_ascii=False, indent=2)
+    
     saq_questions = [sanitize_simple(q) for q in saq_questions_raw]
     lq_questions  = [sanitize_simple(q) for q in lq_questions_raw]
 

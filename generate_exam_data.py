@@ -183,6 +183,7 @@ Below is lecture material text. Your task is to generate a JSON object for a pra
       {{
         "stem": "...",
         "options": ["...", "...", "...", "..."],
+        "correct_answer_text": "...",  // The text content of the correct answer (must match one of the options exactly)
         "marks": 2
       }}
     ],
@@ -224,7 +225,7 @@ Question-specific requirements:
   - {"Otherwise, " if special_requests else ""}focus on a genuine concept or skill from the lecture (e.g. number systems, data representation, machine instructions, operating systems, file system, etc., depending on the lecture content),
   - have exactly 4 options,
   - have only **one clearly correct** option; the other options must be plausible distractors,
-  - **IMPORTANT**: The correct answer should be randomly distributed across options A, B, C, and D. Three consecutive answers cannot be the same.
+  - include "correct_answer_text" field containing the exact text of the correct answer (must match one of the options exactly). Do NOT include "correct_option" (A/B/C/D) - only the text.
   - match the difficulty level specified above.
 - "saq" must contain EXACTLY {short_answer_count} short-answer questions.
 - Each SAQ must:
@@ -279,6 +280,17 @@ def build_answer_prompt(exam_data: dict) -> str:
     # 如果中文字符占比超过10%，认为是中文试卷
     has_chinese = total_chars > 0 and (chinese_chars / total_chars) > 0.1
     
+    # 检查是否有预设的correct_option（从render_exam.py保存的）
+    has_preset_answers = any("correct_option" in q for q in mcq_questions)
+    preset_answers_info = ""
+    if has_preset_answers:
+        preset_answers = [q.get("correct_option", "?") for q in mcq_questions]
+        preset_answers_info = f"\n**重要**：以下题目已经有预设的正确答案（选项已随机打乱）：\n"
+        for i, (q, correct_opt) in enumerate(zip(mcq_questions, preset_answers), 1):
+            if "correct_option" in q:
+                preset_answers_info += f"Q{i}: 正确答案是 {correct_opt}\n"
+        preset_answers_info += "请使用这些预设的正确答案，不要自己判断。\n"
+    
     if has_chinese:
         # 中文提示词
         for i, q in enumerate(mcq_questions, 1):
@@ -290,10 +302,11 @@ def build_answer_prompt(exam_data: dict) -> str:
         
         prompt = f"""基于刚才生成的考试题目，现在请生成详细的答案解析（Answer Key）。
 
+{preset_answers_info if has_preset_answers else ""}
 要求：
 
 1. 对于每道选择题(MCQ)：提供正确答案选项（A/B/C/D）+ 简短解析（解释为什么该选项正确）
-   **重要**：每道题的正确答案可能不同，请仔细分析每道题，不要默认选择A。正确答案应该是A、B、C、D中的任意一个，根据题目内容合理选择。
+   {"**重要**：请使用上面预设的正确答案，不要自己判断。" if has_preset_answers else "**重要**：每道题的正确答案可能不同，请仔细分析每道题，不要默认选择A。正确答案应该是A、B、C、D中的任意一个，根据题目内容合理选择。"}
 
 2. 对于每道简答题(Short Answer)：提供参考答案要点 + 评分标准
 
@@ -349,10 +362,11 @@ def build_answer_prompt(exam_data: dict) -> str:
         
         prompt = f"""Based on the exam questions generated earlier, please generate a detailed answer key.
 
+{preset_answers_info if has_preset_answers else ""}
 Requirements:
 
 1. For each Multiple Choice Question (MCQ): Provide the correct option (A/B/C/D) + a brief explanation (explain why this option is correct)
-   **IMPORTANT**: The correct answer may be different for each question. Please carefully analyze each question and do NOT default to option A. The correct answer should be A, B, C, or D based on the actual question content.
+   {"**IMPORTANT**: Please use the preset correct answers above, do not determine them yourself." if has_preset_answers else "**IMPORTANT**: The correct answer may be different for each question. Please carefully analyze each question and do NOT default to option A. The correct answer should be A, B, C, or D based on the actual question content."}
 
 2. For each Short Answer Question: Provide reference answer points + grading criteria
 
@@ -463,6 +477,14 @@ def generate_answer_key(exam_data: dict) -> dict:
     # 验证答案数量是否匹配
     if len(answer_data["mcq"]) != len(exam_data["sections"]["mcq"]):
         raise ValueError(f"MCQ answer count ({len(answer_data['mcq'])}) doesn't match question count ({len(exam_data['sections']['mcq'])})")
+    
+    # 如果exam_data中已经有correct_option（从render_exam.py保存的），使用它而不是AI生成的
+    # 这样可以确保答案与打乱后的选项顺序一致
+    for i, mcq_q in enumerate(exam_data["sections"]["mcq"]):
+        if "correct_option" in mcq_q and i < len(answer_data["mcq"]):
+            # 使用exam_data中保存的correct_option（打乱后的）
+            answer_data["mcq"][i]["correct_option"] = mcq_q["correct_option"]
+            print(f"Using shuffled correct_option for MCQ {i+1}: {mcq_q['correct_option']}")
     if len(answer_data["saq"]) != len(exam_data["sections"]["saq"]):
         raise ValueError(f"SAQ answer count ({len(answer_data['saq'])}) doesn't match question count ({len(exam_data['sections']['saq'])})")
     if len(answer_data["lq"]) != len(exam_data["sections"]["lq"]):
@@ -663,7 +685,7 @@ def validate_exam_data(exam_data: dict, *, strict_counts: bool = True, expected_
     if extra_meta:
         errors.append(f"meta has unexpected keys: {sorted(extra_meta)}")
 
-    allowed_mcq = {"stem", "options", "marks"}  # V1：不让 explanation/answer_index 混进来
+    allowed_mcq = {"stem", "options", "marks", "correct_answer_text"}  # 允许correct_answer_text字段
     for i, q in enumerate(mcq, start=1):
         if isinstance(q, dict):
             extra = set(q.keys()) - allowed_mcq
