@@ -1520,12 +1520,15 @@ async def purchase_download(
                 customer_email = None  # 匿名用户可能没有邮箱
             
             # 构建 line_items：优先使用 STRIPE_PRICE_ID，否则使用 price_data
-            if STRIPE_PRICE_ID:
+            # 检查 Price ID 是否有效（不是占位符）
+            if STRIPE_PRICE_ID and STRIPE_PRICE_ID != "price_xxxxx" and STRIPE_PRICE_ID.startswith("price_"):
                 line_items = [{
                     "price": STRIPE_PRICE_ID,
                     "quantity": 1,
                 }]
+                logger.info(f"Using Stripe Price ID: {STRIPE_PRICE_ID}")
             else:
+                # 使用 price_data 动态创建价格
                 line_items = [{
                     "price_data": {
                         "currency": "usd",
@@ -1537,6 +1540,10 @@ async def purchase_download(
                     },
                     "quantity": 1,
                 }]
+                if STRIPE_PRICE_ID:
+                    logger.warning(f"Invalid or placeholder Price ID '{STRIPE_PRICE_ID}' detected, using price_data instead")
+                else:
+                    logger.info("No STRIPE_PRICE_ID configured, using price_data")
             
             session_params = {
                 "mode": "payment",  # 一次性支付，不是订阅
