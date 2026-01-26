@@ -1634,13 +1634,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         
         job_lecture_paths.append(job_lecture)
 
@@ -1755,7 +1755,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         # 4) 生成预览图（第一页，带水印）
         try:
             _generate_preview_image(job_id, pdf_path, job_dir)
-        except Exception as e:
+    except Exception as e:
             logger.warning(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
             # 预览图生成失败不影响主流程，继续执行
 
@@ -1965,7 +1965,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(lecture_pdf) == 1:
             file_name = lecture_pdf[0].filename or "lecture.pdf"
@@ -2145,7 +2145,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
@@ -2351,6 +2351,14 @@ async def preview_exam(
     # 如果预览图不存在，尝试从PDF生成
     if not preview_path.exists():
         if pdf_path.exists():
+            # 检查预览库是否可用
+            if not PDF_PREVIEW_AVAILABLE:
+                logger.warning(f"Preview image not found for job {job_id} and PDF preview libraries not available")
+                raise HTTPException(
+                    status_code=503, 
+                    detail="Preview image generation is not available. Please install PyMuPDF and Pillow libraries."
+                )
+            
             logger.info(f"Preview image not found for job {job_id}, attempting to generate from PDF")
             try:
                 _generate_preview_image(job_id, pdf_path, job_dir)
@@ -2358,6 +2366,9 @@ async def preview_exam(
                 if not preview_path.exists():
                     logger.error(f"Failed to generate preview image for job {job_id}")
                     raise HTTPException(status_code=500, detail="Failed to generate preview image")
+            except HTTPException:
+                # 重新抛出HTTP异常
+                raise
             except Exception as e:
                 logger.error(f"Error generating preview image for job {job_id}: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail=f"Failed to generate preview image: {str(e)}")
