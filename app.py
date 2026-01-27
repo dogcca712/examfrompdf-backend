@@ -1086,27 +1086,7 @@ async def register(request: Request, payload: Dict[str, str]):
         )
         user_id = cur.lastrowid
     
-    # 关联匿名使用记录（如果存在）
-    anon_id = request.cookies.get("anon_id")
-    if anon_id:
-        association_result = associate_anon_usage_to_user(anon_id, user_id)
-        logger.info(f"Associated anon_id {anon_id[:8]}... to new user {user_id}, bonus: {association_result['bonus_count']}")
-    else:
-        # 如果没有 anon_id，仍然给注册奖励
-        now = datetime.utcnow().isoformat()
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO registration_bonus (user_id, bonus_count, used_count, created_at)
-                VALUES (?, 3, 0, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    bonus_count = bonus_count + 3
-                """,
-                (user_id, now)
-            )
-        logger.info(f"Gave registration bonus to new user {user_id} (no anon_id)")
-    
+    # 简化注册逻辑：只创建用户账户，不关联匿名jobs，不给注册奖励
     logger.info(f"User registered: {email} (id: {user_id})")
 
     token = generate_jwt(user_id, email)
@@ -1118,8 +1098,7 @@ async def register(request: Request, payload: Dict[str, str]):
             "id": user_id,
             "email": email,
             "plan": plan
-        },
-        "bonus_count": 3  # 注册奖励次数
+        }
     }
     
     # 返回包含Cookie的响应
@@ -1490,7 +1469,7 @@ async def purchase_download(
                 logger.info(f"Job {job_id} is already unlocked for {user_info}")
                 return {"success": True, "unlocked": True, "message": "Job is already unlocked"}
         
-        # Mock 模式：直接返回成功并解锁（跳过 Stripe 支付）
+        # Mock 模式：直接返回成功并解锁
         if ENABLE_MOCK_PAYMENT:
             logger.info(f"Mock payment enabled: granting download access for {user_info}, job_id={job_id}")
             # 在 Mock 模式下直接解锁
@@ -1501,21 +1480,7 @@ async def purchase_download(
                     "UPDATE jobs SET is_unlocked = 1, unlocked_at = ? WHERE id = ?",
                     (unlocked_at, job_id)
                 )
-                # 保存交易记录（标记为 mock 模式）
-                created_at = datetime.utcnow().isoformat()
-                user_id_val = current_user["id"] if current_user else None
-                cur.execute(
-                    """
-                    INSERT INTO transactions (job_id, user_id, stripe_session_id, amount, currency, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (job_id, user_id_val, f"mock_{job_id}_{int(time.time())}", 99, "usd", "completed", created_at)
-                )
-            # 返回成功响应，包含 success_url 以便前端重定向（保持原有流程）
-            base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com").rstrip('/')
-            success_url = f"{base_url}/?payment=success&job_id={job_id}"
-            logger.info(f"Mock payment: returning success with redirect_url={success_url}")
-            return {"success": True, "unlocked": True, "redirect_url": success_url}
+            return {"success": True, "unlocked": True}
         
         # 正常模式：创建 Stripe Checkout Session
         if not STRIPE_SECRET_KEY:
@@ -1531,21 +1496,7 @@ async def purchase_download(
                         "UPDATE jobs SET is_unlocked = 1, unlocked_at = ? WHERE id = ?",
                         (unlocked_at, job_id)
                     )
-                    # 保存交易记录（标记为 mock 模式）
-                    created_at = datetime.utcnow().isoformat()
-                    user_id_val = current_user["id"] if current_user else None
-                    cur.execute(
-                        """
-                        INSERT INTO transactions (job_id, user_id, stripe_session_id, amount, currency, status, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (job_id, user_id_val, f"mock_{job_id}_{int(time.time())}", 99, "usd", "completed", created_at)
-                    )
-                # 返回成功响应，包含 success_url 以便前端重定向（保持原有流程）
-                base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com").rstrip('/')
-                success_url = f"{base_url}/?payment=success&job_id={job_id}"
-                logger.info(f"Mock payment (fallback): returning success with redirect_url={success_url}")
-                return {"success": True, "unlocked": True, "redirect_url": success_url}
+                return {"success": True, "unlocked": True}
             else:
                 logger.error("Stripe API key not configured in production environment")
                 raise HTTPException(status_code=500, detail="Stripe API key not configured")
@@ -1877,13 +1828,11 @@ async def usage_status(current_user=Depends(get_current_user)):
     daily_limit = limits.get("daily", 1)
     monthly_limit = limits.get("monthly", 30)
     
-    # 计算是否可以生成
+    # 计算是否可以生成（已移除注册奖励逻辑）
     if plan == "free":
         can_generate = daily_count < daily_limit
     else:
         can_generate = monthly_count < monthly_limit
-    
-    bonus_remaining = get_registration_bonus_remaining(current_user["id"])
     
     return {
         "plan": plan,
@@ -1891,8 +1840,7 @@ async def usage_status(current_user=Depends(get_current_user)):
         "daily_limit": daily_limit,
         "monthly_used": monthly_count,
         "monthly_limit": monthly_limit,
-        "can_generate": can_generate or bonus_remaining > 0,  # 包括注册奖励
-        "bonus_remaining": bonus_remaining,  # 注册奖励剩余次数
+        "can_generate": can_generate,
     }
 
 
@@ -2708,19 +2656,12 @@ async def generate_exam(
 
         # 判断是认证用户还是匿名用户
         if current_user:
-            # 认证用户：检查用量限制（包括注册奖励）
+            # 认证用户：检查用量限制
             user_id = current_user["id"]
             user_type = "authenticated"
             
-            # 检查是否有注册奖励可用
-            bonus_remaining = get_registration_bonus_remaining(user_id)
-            if bonus_remaining > 0:
-                # 使用注册奖励
-                use_registration_bonus(user_id)
-                logger.info(f"Authenticated user {user_id} using registration bonus (remaining: {bonus_remaining - 1})")
-            else:
-                # 检查正常用量限制
-                check_usage_limit(user_id)
+            # 检查正常用量限制（已移除注册奖励逻辑）
+            check_usage_limit(user_id)
             
             logger.info(f"Authenticated user {user_id} requesting job")
         else:
@@ -2934,7 +2875,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
