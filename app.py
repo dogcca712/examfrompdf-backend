@@ -2499,6 +2499,7 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 # Pydantic 模型
 class GenerateExamRequest(BaseModel):
     session_id: str
+    file_name: Optional[str] = None  # 可选：前端传递的文件名（用于显示）
     mcq_count: int = 10
     short_answer_count: int = 3
     long_question_count: int = 1
@@ -2603,6 +2604,7 @@ async def generate_exam(
     
     参数（JSON）：
     - session_id: 上传session ID
+    - file_name: 可选，显示用的文件名（如果提供，将覆盖内部命名逻辑）
     - mcq_count: 选择题数量（默认10）
     - short_answer_count: 简答题数量（默认3）
     - long_question_count: 论述题数量（默认1）
@@ -2682,11 +2684,18 @@ async def generate_exam(
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
         job_id = str(uuid.uuid4())
-        # 处理多个文件：使用第一个文件名，如果有多个则添加计数
-        if len(pdf_files) == 1:
-            file_name = pdf_files[0].name
+        # 处理文件名：优先使用前端传递的 file_name，否则使用内部命名逻辑
+        if config.file_name:
+            # 使用前端传递的文件名
+            file_name = config.file_name
+            logger.info(f"[GENERATE] Using frontend-provided file_name: {file_name}")
         else:
-            file_name = f"{pdf_files[0].name} (+{len(pdf_files) - 1} more)"
+            # 回退到内部命名逻辑
+            if len(pdf_files) == 1:
+                file_name = pdf_files[0].name
+            else:
+                file_name = f"{pdf_files[0].name} (+{len(pdf_files) - 1} more)"
+            logger.info(f"[GENERATE] Using internal file_name: {file_name}")
         created_at = datetime.utcnow().isoformat()
         
         logger.info(f"[GENERATE] Starting job {job_id} for {user_type} user {user_id}, files: {len(pdf_files)} PDF(s) from session {session_id}")
