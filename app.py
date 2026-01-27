@@ -1490,7 +1490,7 @@ async def purchase_download(
                 logger.info(f"Job {job_id} is already unlocked for {user_info}")
                 return {"success": True, "unlocked": True, "message": "Job is already unlocked"}
         
-        # Mock 模式：直接返回成功并解锁
+        # Mock 模式：直接返回成功并解锁（跳过 Stripe 支付）
         if ENABLE_MOCK_PAYMENT:
             logger.info(f"Mock payment enabled: granting download access for {user_info}, job_id={job_id}")
             # 在 Mock 模式下直接解锁
@@ -1501,7 +1501,21 @@ async def purchase_download(
                     "UPDATE jobs SET is_unlocked = 1, unlocked_at = ? WHERE id = ?",
                     (unlocked_at, job_id)
                 )
-            return {"success": True, "unlocked": True}
+                # 保存交易记录（标记为 mock 模式）
+                created_at = datetime.utcnow().isoformat()
+                user_id_val = current_user["id"] if current_user else None
+                cur.execute(
+                    """
+                    INSERT INTO transactions (job_id, user_id, stripe_session_id, amount, currency, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (job_id, user_id_val, f"mock_{job_id}_{int(time.time())}", 99, "usd", "completed", created_at)
+                )
+            # 返回成功响应，包含 success_url 以便前端重定向（保持原有流程）
+            base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com").rstrip('/')
+            success_url = f"{base_url}/?payment=success&job_id={job_id}"
+            logger.info(f"Mock payment: returning success with redirect_url={success_url}")
+            return {"success": True, "unlocked": True, "redirect_url": success_url}
         
         # 正常模式：创建 Stripe Checkout Session
         if not STRIPE_SECRET_KEY:
@@ -1517,7 +1531,21 @@ async def purchase_download(
                         "UPDATE jobs SET is_unlocked = 1, unlocked_at = ? WHERE id = ?",
                         (unlocked_at, job_id)
                     )
-                return {"success": True, "unlocked": True}
+                    # 保存交易记录（标记为 mock 模式）
+                    created_at = datetime.utcnow().isoformat()
+                    user_id_val = current_user["id"] if current_user else None
+                    cur.execute(
+                        """
+                        INSERT INTO transactions (job_id, user_id, stripe_session_id, amount, currency, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (job_id, user_id_val, f"mock_{job_id}_{int(time.time())}", 99, "usd", "completed", created_at)
+                    )
+                # 返回成功响应，包含 success_url 以便前端重定向（保持原有流程）
+                base_url = os.environ.get("API_BASE_URL", "https://examfrompdf.com").rstrip('/')
+                success_url = f"{base_url}/?payment=success&job_id={job_id}"
+                logger.info(f"Mock payment (fallback): returning success with redirect_url={success_url}")
+                return {"success": True, "unlocked": True, "redirect_url": success_url}
             else:
                 logger.error("Stripe API key not configured in production environment")
                 raise HTTPException(status_code=500, detail="Stripe API key not configured")
