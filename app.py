@@ -2218,13 +2218,13 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
     job_lecture_paths = []
     for idx, lecture_path in enumerate(lecture_paths):
         if len(lecture_paths) == 1:
-            job_lecture = job_dir / "lecture.pdf"
+    job_lecture = job_dir / "lecture.pdf"
         else:
             job_lecture = job_dir / f"lecture_{idx}.pdf"
         
         # 如果文件不在job_dir中，复制它
         if lecture_path != job_lecture:
-            shutil.copy2(lecture_path, job_lecture)
+    shutil.copy2(lecture_path, job_lecture)
         
         job_lecture_paths.append(job_lecture)
 
@@ -2374,7 +2374,7 @@ def run_job(job_id: str, lecture_paths: List[Path], exam_config: Optional[Dict[s
         # 4) 生成预览图（第一页，带水印）
         try:
             _generate_preview_image(job_id, pdf_path, job_dir)
-        except Exception as e:
+    except Exception as e:
             logger.warning(f"Failed to generate preview image for job {job_id}: {e}", exc_info=True)
             # 预览图生成失败不影响主流程，继续执行
 
@@ -2681,7 +2681,7 @@ async def generate_exam(
             user_type = "anonymous"
             logger.info(f"Anonymous user (anon_id: {anon_id[:8]}...) requesting job")
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
         # 处理多个文件：使用第一个文件名，如果有多个则添加计数
         if len(pdf_files) == 1:
             file_name = pdf_files[0].name
@@ -2875,7 +2875,7 @@ async def job_status(
             row = cur.fetchone()
             if row:
                 logger.info(f"[STATUS] Found job {job_id} by user_id={current_user['id']}, status={row['status']}")
-            else:
+    else:
                 logger.warning(f"[STATUS] Job {job_id} not found by user_id={current_user['id']}, trying device_fingerprint")
             # 如果没找到，尝试通过设备指纹查询（可能是IP/User-Agent变化）
             if not row:
@@ -2886,14 +2886,14 @@ async def job_status(
                 )
                 row = cur.fetchone()
                 if row:
-                    logger.info(f"[STATUS] Found job {job_id} by device_fingerprint, user_id in DB={row.get('user_id')}, current_user_id={current_user['id']}")
+                    logger.info(f"[STATUS] Found job {job_id} by device_fingerprint, user_id in DB={row['user_id']}, current_user_id={current_user['id']}")
                     # 如果通过设备指纹找到，验证user_id是否匹配或为NULL
                     if row:
-                        # SQLite返回的row是字典，可以直接访问
-                        if row.get("user_id") is not None and row.get("user_id") != current_user["id"]:
-                            logger.warning(f"[STATUS] Device fingerprint match but user_id mismatch: DB={row.get('user_id')}, current={current_user['id']}")
+                        # SQLite返回的row是Row对象，使用字典式访问
+                        if row["user_id"] is not None and row["user_id"] != current_user["id"]:
+                            logger.warning(f"[STATUS] Device fingerprint match but user_id mismatch: DB={row['user_id']}, current={current_user['id']}")
                             row = None  # 设备指纹匹配但user_id不匹配，拒绝
-                        elif row.get("user_id") is None:
+                        elif row["user_id"] is None:
                             logger.info(f"[STATUS] Found anonymous job {job_id} for authenticated user {current_user['id']}, will update user_id")
         else:
             # 匿名用户：通过device_fingerprint查询
@@ -2972,12 +2972,12 @@ async def download_exam(
                 )
                 row = cur.fetchone()
                 if row:
-                    logger.info(f"[DOWNLOAD] Found job {job_id} by device_fingerprint, user_id in DB={row.get('user_id')}, current_user_id={current_user['id']}")
+                    logger.info(f"[DOWNLOAD] Found job {job_id} by device_fingerprint, user_id in DB={row['user_id']}, current_user_id={current_user['id']}")
                 # 如果通过设备指纹找到，且user_id匹配或为NULL，允许访问
                 if row:
                     if row["user_id"] is not None and row["user_id"] != current_user["id"]:
                         # 设备指纹匹配但user_id不匹配，可能是设备被其他用户使用过
-                        logger.warning(f"[DOWNLOAD] Device fingerprint match but user_id mismatch: DB={row.get('user_id')}, current={current_user['id']}")
+                        logger.warning(f"[DOWNLOAD] Device fingerprint match but user_id mismatch: DB={row['user_id']}, current={current_user['id']}")
                         raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
                     # 如果user_id为NULL，可能是匿名用户创建后注册的job，更新user_id
                     elif row["user_id"] is None:
@@ -2996,15 +2996,16 @@ async def download_exam(
                 )
                 row = cur.fetchone()
                 if row:
-                    logger.info(f"[DOWNLOAD] Found job {job_id} by job_id only, user_id in DB={row.get('user_id')}, current_user_id={current_user['id']}")
+                    logger.info(f"[DOWNLOAD] Found job {job_id} by job_id only, user_id in DB={row['user_id']}, current_user_id={current_user['id']}")
                 # 如果找到但user_id不是当前用户，且不是NULL（匿名用户），则拒绝
                 if row and row["user_id"] is not None and row["user_id"] != current_user["id"]:
-                    logger.warning(f"[DOWNLOAD] Job {job_id} belongs to different user: DB={row.get('user_id')}, current={current_user['id']}")
+                    logger.warning(f"[DOWNLOAD] Job {job_id} belongs to different user: DB={row['user_id']}, current={current_user['id']}")
                     raise HTTPException(status_code=403, detail="Access denied: job belongs to another user")
                 # 如果user_id为NULL，尝试通过设备指纹验证
                 elif row and row["user_id"] is None:
                     device_fingerprint = get_device_fingerprint(request)
-                    logger.info(f"[DOWNLOAD] Job {job_id} has NULL user_id, comparing device_fingerprint: DB={row.get('device_fingerprint')[:16] if row.get('device_fingerprint') else 'None'}..., current={device_fingerprint[:16]}...")
+                    db_fingerprint = row['device_fingerprint'] if row['device_fingerprint'] else None
+                    logger.info(f"[DOWNLOAD] Job {job_id} has NULL user_id, comparing device_fingerprint: DB={db_fingerprint[:16] if db_fingerprint else 'None'}..., current={device_fingerprint[:16]}...")
                     if row["device_fingerprint"] != device_fingerprint:
                         logger.warning(f"[DOWNLOAD] Device fingerprint mismatch for job {job_id}")
                         raise HTTPException(status_code=403, detail="Access denied: job belongs to another device")
