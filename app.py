@@ -2062,9 +2062,12 @@ async def get_jobs(current_user=Depends(get_current_user), limit: int = 50, offs
             job["error"] = row["error"]
         
         jobs.append(job)
-        logger.debug(f"[GET JOBS] Added job {row['id']} ({row['file_name']}) to response")
+        logger.info(f"[GET JOBS] Added job {row['id'][:8]}... with file_name='{row['file_name']}' to response")
     
     logger.info(f"[GET JOBS] Final response: {len(jobs)} jobs, total={total}")
+    # 记录所有返回的 file_name 用于调试
+    file_names = [job['fileName'] for job in jobs]
+    logger.info(f"[GET JOBS] Returning fileNames: {file_names}")
     return {"jobs": jobs, "total": total}
 
 
@@ -2620,7 +2623,7 @@ async def generate_exam(
         special_requests = config.special_requests
         
         # 记录接收到的参数（用于调试）
-        logger.info(f"Received exam config: Session={session_id}, MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests[:50] if special_requests else 'None'}...")
+        logger.info(f"Received exam config: Session={session_id}, FileName={config.file_name if config.file_name else 'None (will use internal naming)'}, MCQ={mcq_count}, SAQ={short_answer_count}, LQ={long_question_count}, Difficulty={difficulty}, SpecialRequests={special_requests[:50] if special_requests else 'None'}...")
         
         # 验证session_id格式
         try:
@@ -2722,7 +2725,9 @@ async def generate_exam(
                     cur.execute("SELECT id, user_id, file_name FROM jobs WHERE id = ?", (job_id,))
                     verify_row = cur.fetchone()
                     if verify_row:
-                        logger.info(f"[GENERATE] Verified: Job {job_id} exists in DB with user_id={verify_row['user_id']}, file_name={verify_row['file_name']}")
+                        logger.info(f"[GENERATE] Verified: Job {job_id} exists in DB with user_id={verify_row['user_id']}, file_name={verify_row['file_name']} (expected: {file_name})")
+                        if verify_row['file_name'] != file_name:
+                            logger.error(f"[GENERATE] WARNING: file_name mismatch! Expected '{file_name}', but DB has '{verify_row['file_name']}'")
                     else:
                         logger.error(f"[GENERATE] CRITICAL: Job {job_id} was not found in DB immediately after INSERT!")
                 else:
@@ -2734,7 +2739,17 @@ async def generate_exam(
                         """,
                         (job_id, None, device_fingerprint, file_name, "queued", created_at, created_at, mcq_count, short_answer_count, long_question_count, difficulty, special_requests),
                     )
-                    logger.info(f"[GENERATE] Job {job_id} saved to DB: user_id=NULL, device_fp={device_fingerprint[:16]}...")
+                    logger.info(f"[GENERATE] Job {job_id} saved to DB: user_id=NULL, device_fp={device_fingerprint[:16]}..., file_name={file_name}")
+                    
+                    # 验证job是否正确保存（匿名用户）
+                    cur.execute("SELECT id, user_id, file_name FROM jobs WHERE id = ?", (job_id,))
+                    verify_row = cur.fetchone()
+                    if verify_row:
+                        logger.info(f"[GENERATE] Verified: Job {job_id} exists in DB with user_id={verify_row['user_id']}, file_name={verify_row['file_name']} (expected: {file_name})")
+                        if verify_row['file_name'] != file_name:
+                            logger.error(f"[GENERATE] WARNING: file_name mismatch! Expected '{file_name}', but DB has '{verify_row['file_name']}'")
+                    else:
+                        logger.error(f"[GENERATE] CRITICAL: Job {job_id} was not found in DB immediately after INSERT!")
             logger.info(f"[GENERATE] Job {job_id} created in database successfully")
             
             # 记录匿名使用（在数据库事务外，避免锁定）
